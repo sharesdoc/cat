@@ -1,6 +1,6 @@
 # Cat — 远程软件工程工作空间 MCP 总体需求与技术实现方案
 
-- 版本：v1.1（个人自托管与多项目参考，自主实现设计提案）
+- 版本：v1.2（多项目源码复用规划及接口版本校正；保留 v1.1 需求基线）
 - 日期：2026-11-26
 - 范围：需求、开源选型、系统设计、工具契约、业务流程、部署与验收。不含已实现代码或实测结论。
 
@@ -48,8 +48,8 @@ Cat 是个人优先的公开、自托管、通用开源项目，不是某个既�
 | [tkgstrator/local-mcp](https://github.com/tkgstrator/local-mcp) | 远程 MCP、OAuth 接入流程、目录深度、分段读取 | 官方 Python SDK 对接标准授权服务；不引入任意 shell 或共享口令式认证 |
 | [Muvon/octofs](https://github.com/muvon/octofs) | 行锚点与哈希、工作目录、精确替换 | Python 工作空间和版本锚点；不引入 SSH/SFTP/shell |
 | [njbrake/filesystem-mcp-server](https://github.com/njbrake/filesystem-mcp-server) | Python 与 Streamable HTTP 文件服务的组织方式 | 参考最小 Python 工具注册和部署；自主实现增强工具 |
-| [Desktop Commander](https://github.com/desktop-commander/remote-desktop-commander) | 远程文件操作的客户端体验与工具说明 | 清晰工具交互、短结果与失败恢复；不依赖托管中继 |
-| [Serena](https://github.com/oraios/serena) | 语言服务、符号级导航和编辑 | P2 可选适配器，不进入 V1 强制依赖 |
+| [Desktop Commander](https://github.com/desktop-commander/remote-desktop-commander) | 远程文件操作的客户端体验与工具说明 | 只参考公开文档及交互；其托管服务实现明确未开源，不依赖托管中继 |
+| [Serena](https://github.com/oraios/serena) | 语言服务、符号级导航和编辑 | P2 可选；当前 Serena 应用 GPL-3.0-or-later 仅参考行为，优先评估 MIT SolidLSP 或标准 LSP，不进入 V1 强制依赖 |
 | [Supergateway](https://github.com/supercorp-ai/supergateway) | stdio 与 HTTP 传输兼容实践 | 仅联调参考；直接由官方 Python SDK 提供协议 |
 
 ### 3.2 语言决策
@@ -66,7 +66,7 @@ Cat 是个人优先的公开、自托管、通用开源项目，不是某个既�
 
 | 技术 | 决策 |
 |---|---|
-| MCP | [官方 Python SDK](https://github.com/modelcontextprotocol/python-sdk)，优先内置 FastMCP，锁定通过联调的稳定版本；不同时引入独立 FastMCP 框架，除非确有缺口 |
+| MCP | [官方 Python SDK](https://github.com/modelcontextprotocol/python-sdk)，优先官方 SDK v2.3.0 候选稳定版内置 MCPServer（v2 已移除 FastMCP），通过联调后固定依赖；若退回 v1 则必须明确锁定 mcp<2、使用该版 FastMCP 并重新验收；不引入独立 FastMCP 框架 |
 | HTTP | SDK Streamable HTTP ASGI 应用 + Uvicorn；无需额外 FastAPI，stdio 可选 |
 | 模型/配置 | Pydantic 参数与配置校验；TOML、tomllib；环境变量覆盖敏感配置 |
 | 文件操作 | os、pathlib（仅路径表示）、hashlib、difflib、shutil（不得绕过安全文件层）；Linux fd-relative 安全操作 |
@@ -85,6 +85,21 @@ Cat 是个人优先的公开、自托管、通用开源项目，不是某个既�
 - 提供英文 README、中文 README.zh-CN（建议）、LICENSE、CONTRIBUTING.md、SECURITY.md、CHANGELOG.md、配置示例、安装/升级/卸载说明和 API 工具文档。真实配置放仓库外，或被 .gitignore 排除；发布前检查 Git 暂存区、历史和构建产物是否含秘密，CI 运行 secret scanning（如 gitleaks）。
 - 不在仓库保存实际工程目录、运行时数据库、审计日志、备份、OAuth 密钥和用户身份信息。示例配置不能直接开启未认证公网访问。
 - 默认 Linux 单机、单用户 owner、多工程、多个独立 AI workspace；不实现多租户管理界面、企业组织/角色体系、集群和复杂运维。ACL 保留简单的主体/工程/路径/动作校验，为后续扩展保留接口。公网安全是硬约束，个人使用不降低权限隔离要求。
+
+### 3.4 源码复用实施总则（v1.2）
+
+Cat 的自主实现不是从零重新发明所有算法。每个标准任务均在第4节列出固定提交的具体代码/测试路径、拟借鉴符号、复用方式、Cat 必须补充的逻辑，在第6节列出参考实现对齐验收。任务档案中的 v1.1 原始 commit 保留用于需求追溯；本节及修订后档案是后续实现的技术细化，未变更 R01–R16 的范围。
+
+| 复用方式 | 适用内容 | 约束 |
+|---|---|---|
+| 直接依赖 | 官方 Python SDK、Python 标准库、ripgrep、Pydantic、SQLite、成熟 IdP/TLS 组件 | 固定兼容版本、直接使用其稳定接口，不重复实现协议/哈希/数据库/搜索引擎 |
+| 代码移植 | 官方 filesystem、j0hanz、local-mcp、octofs 等的适用文件操作、分页、精确编辑、事务组织和诊断算法 | 审阅具体源码、许可及测试；将合适实现移植为统一 Python 模块，保留必要版权与来源，不盲目逐行翻译，不导入整个上游服务 |
+| 测试复用 | 官方 filesystem、SDK、octofs、CPython、ripgrep 的测试场景 | 复现行为及边界；代码复制仍须符合许可；Cat 实测必须单独记录 |
+| 独立补充 | 工程注册/ACL、独立工作空间、持久幂等与事务、安全路径、备份恢复、工具契约和个人配置 | 现有候选不完整覆盖 Cat 需求，明确自建边界；共享模块只能有一个实现，不能由各工具各自复制 |
+
+全局研发门禁：工程骨架任务完成后先执行标准任务“建立开源参考项目和依赖许可清单”（Task-R-20261126012656434-P1-New.md），随后才能引入业务参考实现。各任务在动手之前全文阅读自己列出的参考实现与相关测试（按固定提交，不默认跟踪 main），确认可采用的算法/数据结构/调用顺序及不可采用的行为；逐文件确认许可证及 SPDX，记录实际使用路径、符号、版本、移植或直接调用方式、变更点和对应测试。未读源码不得声称已复用；许可不明或安全语义不符时不得复制，说明原因并使用兼容方案。无需为了凑复用比例而引入不相关依赖。
+
+固定参考版本和全局差异记录见 [Cat-开源源码参考基线.md](Cat-开源源码参考基线.md)。SDK v2.3.0 候选的 MCPServer、TokenVerifier 和 transport middleware 已核对源码；实际安装与协议联调仍是 P0 门禁。Remote Desktop Commander 远程托管实现非开源，其 README 仅用于连接体验参考。Serena 应用当前 GPL-3.0-or-later，不直接并入 MIT Cat，MIT SolidLSP 可独立评估；不得把整个 Serena 软件包描述为 MIT。
 
 ## 4. ChatGPT 及其他客户端接入
 
@@ -424,7 +439,7 @@ P0-A 与 P0-B 可有限并行（核心契约先固定）；P0-C 必须在安全�
 ## 16. 风险与待确认事项
 
 1. ChatGPT 套餐及工作空间是否支持自定义写工具是最大前置风险；无真实 endpoint、OAuth 配置及目标账号权限，当前无法完成联调。
-2. 参考项目尚未固定 commit/逐文件审查及运行测试；其设计可参考，不代表实现已验证安全。各模块使用 Python 独立实现，不依赖任何第三方完整文件 MCP。
+2. 已固定参考仓库 commit、核对目录树并抽查关键源码；尚未完成所有参考文件的逐行审计、许可证逐文件核验和运行测试。各任务必须在实现前完成指定参考阅读和许可检查；设计参考不等于安全验证。
 3. 默认 Linux、Python 3.12+、OAuth、单 owner、多工程及单进程持久状态；这些属于可调整的通用产品设计，实际支持矩阵需实测。
 4. 共享本地文件与外部编辑器存在竞态，严格保证依赖统一协调或隔离工作树；这是需要确认的运行模式。
 5. 文件读写与 Shell/编译执行分离是本方案主动收敛的边界。若要允许 AI 独立编译测试，应增加单独受控执行服务，不暴露任意 Shell。
