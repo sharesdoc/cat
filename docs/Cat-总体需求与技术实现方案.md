@@ -1,9 +1,7 @@
 # Cat — 远程软件工程工作空间 MCP 总体需求与技术实现方案
 
-- 任务：CAT-20261126 / 批次 01
-- 版本：v1.0（设计提案，待独立评审）
+- 版本：v1.1（个人自托管与多项目参考，自主实现设计提案）
 - 日期：2026-11-26
-- 仓库：https://github.com/sharesdoc/cat
 - 范围：需求、开源选型、系统设计、工具契约、业务流程、部署与验收。不含已实现代码或实测结论。
 
 ## 1. 背景与目标
@@ -37,24 +35,56 @@ Cat 是面向 AI 编程的远程工程文件系统服务。远端 AI 通过标�
 
 R01 是首个门禁：必须在目标 ChatGPT 账户上实测读写，不以 MCP 服务端可运行替代客户端验收。
 
-## 3. 现有开源项目与选型
+## 3. 多项目参考与自主实现技术路线
 
-调研依据为公开 README、官方文档及工具说明，未安装运行、未进行全源码安全审计。以下评分为设计适配判断，不是性能实测。
+### 3.1 选型原则
 
-| 候选 | 已有能力 | 缺口及风险 | 定位 |
+Cat 是个人优先的公开、自托管、通用开源项目，不是某个既有业务系统的专属组件。不 fork 单一文件 MCP，不将多个完整 MCP 服务串联成运行时依赖，不复制未经审查的第三方代码。参考各项目公开实践，以统一 Python 代码库自主实现业务逻辑；直接依赖成熟通用组件（官方 SDK、ripgrep 等）。公开文档调研不是全源码审计或运行测试。每项参考在对应开发阶段固定 commit、记录许可证及具体参考文件，再以独立测试验证自己的实现。
+
+| 参考项目 | 借鉴内容 | Cat 自主实现边界 |
+|---|---|---|
+| [官方 filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) | 工具命名、根目录限制、树结构、文件 CRUD 和编辑交互 | Python 安全路径层、目录游标、单文件契约；旧版以 stdio 为主，当前 README 已描述 HTTP，接入仍需测试 |
+| [j0hanz/filesystem-mcp](https://github.com/j0hanz/filesystem-mcp) | 分段读取、精确匹配、diff/patch、敏感文件过滤、撤销、结果限制 | 独立编辑算法、持久恢复、版本条件写；不运行 Node 服务，不 fork |
+| [tkgstrator/local-mcp](https://github.com/tkgstrator/local-mcp) | 远程 MCP、OAuth 接入流程、目录深度、分段读取 | 官方 Python SDK 对接标准授权服务；不引入任意 shell 或共享口令式认证 |
+| [Muvon/octofs](https://github.com/muvon/octofs) | 行锚点与哈希、工作目录、精确替换 | Python 工作空间和版本锚点；不引入 SSH/SFTP/shell |
+| [njbrake/filesystem-mcp-server](https://github.com/njbrake/filesystem-mcp-server) | Python 与 Streamable HTTP 文件服务的组织方式 | 参考最小 Python 工具注册和部署；自主实现增强工具 |
+| [Desktop Commander](https://github.com/desktop-commander/remote-desktop-commander) | 远程文件操作的客户端体验与工具说明 | 清晰工具交互、短结果与失败恢复；不依赖托管中继 |
+| [Serena](https://github.com/oraios/serena) | 语言服务、符号级导航和编辑 | P2 可选适配器，不进入 V1 强制依赖 |
+| [Supergateway](https://github.com/supercorp-ai/supergateway) | stdio 与 HTTP 传输兼容实践 | 仅联调参考；直接由官方 Python SDK 提供协议 |
+
+### 3.2 语言决策
+
+| 语言 | 优点 | 代价 | 结论 |
 |---|---|---|---|
-| [modelcontextprotocol/servers filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) | Node/TS 官方参考，根目录、读写、局部编辑、目录树、路径搜索 | 主要 stdio；内容检索、分页、项目会话、版本与持久审计须扩展 | 稳健基础及回退 |
-| [j0hanz/filesystem-mcp](https://github.com/j0hanz/filesystem-mcp) | MIT；Node/TS；行读取、RE2 内容搜索、精确编辑、patch、diff、undo、忽略规则、敏感文件过滤、Streamable HTTP | Node 24+；HTTP API key 不等于 ChatGPT OAuth；多文件工具、根目录变更及确认机制需要封装；undo 默认内存 | **主选文件操作引擎** |
-| [tkgstrator/local-mcp](https://github.com/tkgstrator/local-mcp) | MIT；Rust/rmcp；远程 HTTP、OAuth、分段读取、目录深度、精确替换、搜索 | 共享口令式 OAuth 非多租户授权；含任意 shell，需移除；项目/会话、审计、并发能力待核 | 远程接入参考及备选 |
-| [njbrake/filesystem-mcp-server](https://github.com/njbrake/filesystem-mcp-server) | Apache-2.0；Python；HTTP，8 个基础文件工具，amd64/arm64 | 无完整精确编辑和代码检索工具集；公网认证及会话需新增 | 简易原型参考 |
-| [desktop-commander/remote-desktop-commander](https://github.com/desktop-commander/remote-desktop-commander) | 远程 OAuth 中继、文件和终端访问 | 官方托管中继形态与自有服务器直连不同，终端权限过宽 | 交互体验参考 |
-| [Muvon/octofs](https://github.com/muvon/octofs) | Rust，行哈希编辑、搜索、工作目录、HTTP、SSH/SFTP | Shell 与跨主机路径扩大权限面；bearer 与 OAuth 不同 | 行锚点与编辑设计参考 |
-| [oraios/serena](https://github.com/oraios/serena) | LSP/语义级代码导航和编辑、HTTP | 语言服务资源占用、并非通用文件管理 | P2 可选增强 |
-| [supercorp-ai/supergateway](https://github.com/supercorp-ai/supergateway) | stdio/Streamable HTTP/SSE 转换 | 协议转换不实现工程级授权、隔离与审计 | 仅测试/适配工具 |
+| Python | 文件、文本、哈希、SQLite 标准库；官方 MCP SDK；易读、快速迭代 | 需管理 Python 环境；阻塞 I/O 不能占用异步事件循环 | 首选 |
+| TypeScript | 官方 MCP 生态成熟，异步网络好 | Node/npm 工具链，类型和打包增加个人维护面 | 备选 |
+| Go | 单二进制部署、并发与 I/O 性能 | 相比 Python 需更多显式代码，编辑工具实现成本较高 | 只有性能/部署证据支持时再评估 |
+| Rust | 安全内存、性能、系统编程能力 | 学习及维护成本较高 | 不作为默认实现 |
+| Shell | 便于安装运维 | 难以维护结构化 MCP、权限、事务和可靠错误处理 | 仅用于辅助脚本 |
 
-**决策：优先采用 j0hanz/filesystem-mcp 作为经过审查的文件能力底座，Cat 自行实现薄而严格的工程管理、会话、授权、事务和审计层。** 不直接暴露 upstream 工具表。优先通过固定版本依赖/受控本地子进程复用，若上游核心 API 不适合复用或不能接入 Cat 的文件描述符安全边界，则对必要模块维护小型 fork。若关键路径不能保证安全、版本一致性或单文件语义，则改用官方 MCP SDK 加官方 filesystem 的可复用逻辑实现，不以复用率牺牲正确性。
+文件 I/O 和网络等待是主要负载，Python 性能预计足够，须通过验收基准验证。高吞吐搜索采用 ripgrep 的成熟实现，不自行编写全文检索引擎。使用 Python 3.12+（CI 首先覆盖 3.12/3.13，实际支持版本以兼容测试为准）；不为了追逐最新版本使用未稳定的 SDK API。
 
-P0 选择 TypeScript/Node 24 LTS、官方 MCP TypeScript SDK（固定兼容版本）、Zod/JSON Schema、SQLite WAL（单机本地盘）、RE2 或 ripgrep（受控子进程）、Caddy/Nginx、外部兼容 OAuth/OIDC 服务。部署以 Linux amd64/arm64 为首选。许可处理：锁定精确 upstream commit、验证 LICENSE 和依赖许可、保留版权及 NOTICE（如适用）、记录 SBOM；不在本轮复制第三方源代码。Node 版本、SDK 版本、镜像架构待 P0 验证。
+| 技术 | 决策 |
+|---|---|
+| MCP | [官方 Python SDK](https://github.com/modelcontextprotocol/python-sdk)，优先内置 FastMCP，锁定通过联调的稳定版本；不同时引入独立 FastMCP 框架，除非确有缺口 |
+| HTTP | SDK Streamable HTTP ASGI 应用 + Uvicorn；无需额外 FastAPI，stdio 可选 |
+| 模型/配置 | Pydantic 参数与配置校验；TOML、tomllib；环境变量覆盖敏感配置 |
+| 文件操作 | os、pathlib（仅路径表示）、hashlib、difflib、shutil（不得绕过安全文件层）；Linux fd-relative 安全操作 |
+| 搜索 | [ripgrep](https://github.com/BurntSushi/ripgrep) 可选加速组件；标准库有界字面量搜索回退；正则不可无超时运行 |
+| 状态 | sqlite3、WAL、文件备份；单进程、短事务、不引入数据库服务器 |
+| 鉴权 | SDK token verifier + 成熟 OAuth 授权服务；本地 loopback 可使用受限开发模式，公网必须认证 |
+| 工程 | pyproject.toml、uv.lock、uv、pytest、Ruff；类型注解、简洁函数、模块化 |
+| 部署 | 原生 Python/uv、systemd 或 Docker；Caddy/Nginx 可选作为 TLS 入口 |
+
+官方 SDK 文档：[授权](https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/run/authorization.md)、[ASGI](https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/run/asgi.md)；[Python os](https://docs.python.org/3.12/library/os.html) 提供 dir_fd、fsync 等能力。API 细节以锁定版本为准。文件路径安全与外部编辑竞态仍需要专门验证，不能因为 Python 有标准库就承诺安全。
+
+### 3.3 公开开源工程规范
+
+- 沿用仓库现有许可证；核查第三方许可，禁止不兼容复制，若引入第三方源码须记录来源 commit、许可证、版权及 NOTICE（如需）。维护 THIRD_PARTY_NOTICES.md 和依赖清单；参考设计与实际依赖分开。
+- 全部示例使用虚构项目 demo-app、demo-lib、example.com、/srv/cat/projects。不得出现真实用户名、账号、IP、私有域名、内部工程名、客户数据、真实绝对路径、访问令牌或内部协作协议。公开仓库只保留与通用产品有关的设计；测试数据由程序生成。
+- 提供英文 README、中文 README.zh-CN（建议）、LICENSE、CONTRIBUTING.md、SECURITY.md、CHANGELOG.md、配置示例、安装/升级/卸载说明和 API 工具文档。真实配置放仓库外，或被 .gitignore 排除；发布前检查 Git 暂存区、历史和构建产物是否含秘密，CI 运行 secret scanning（如 gitleaks）。
+- 不在仓库保存实际工程目录、运行时数据库、审计日志、备份、OAuth 密钥和用户身份信息。示例配置不能直接开启未认证公网访问。
+- 默认 Linux 单机、单用户 owner、多工程、多个独立 AI workspace；不实现多租户管理界面、企业组织/角色体系、集群和复杂运维。ACL 保留简单的主体/工程/路径/动作校验，为后续扩展保留接口。公网安全是硬约束，个人使用不降低权限隔离要求。
 
 ## 4. ChatGPT 及其他客户端接入
 
@@ -69,7 +99,7 @@ P0 选择 TypeScript/Node 24 LTS、官方 MCP TypeScript SDK（固定兼容版�
 
 MCP 使用 Streamable HTTP、标准初始化及版本协商，采用受支持 SDK；兼容 MCP 2025-era 客户端及后续版本须经集成测试。不依赖 MCP session header 一定存在或会话持久化；Cat 自身 workspace_id 是业务级上下文，与协议连接 ID 分离。若客户端不支持 elicitation，服务端返回需审批的结构化错误，由独立授权界面或客户端显式流程处理，不自动降级为允许。
 
-协议参考：https://modelcontextprotocol.io/specification/ ，SDK：https://github.com/modelcontextprotocol/typescript-sdk 。
+协议参考：https://modelcontextprotocol.io/specification/ ，SDK：https://github.com/modelcontextprotocol/python-sdk 。
 
 ## 5. 系统架构
 
@@ -91,19 +121,19 @@ flowchart TD
     D --> N[OAuth identity provider]
 ```
 
-网关：MCP 协议、Schema 校验、工具描述、统一错误和限制。身份服务：校验 access token 的签名、issuer、audience、expiry、scope；禁止客户端自行传 user_id。工程目录由管理员配置并明确授予主体，不接受 AI 任意绝对路径。Workspace 管理负责虚拟 CWD、租期、上下文版本。文件服务负责路径解析、读取、目录和检索、写入、编辑。变更协调器执行版本检查、锁、原子写、审计和恢复。每个工程使用最小权限 worker/容器，避免单个进程跨工程授权失效。审计/备份在工程之外独立存储。MCP server 不使用进程级 chdir。
+网关：MCP 协议、Schema 校验、工具描述、统一错误和限制。身份服务：校验 access token 的签名、issuer、audience、expiry、scope；禁止客户端自行传 user_id。工程目录由管理员配置并明确授予主体，不接受 AI 任意绝对路径。Workspace 管理负责虚拟 CWD、租期、上下文版本。文件服务负责路径解析、读取、目录和检索、写入、编辑。变更协调器执行版本检查、锁、原子写、审计和恢复。默认单进程、单 owner、多工程，逻辑隔离；公网挂载仅授权目录，专用非 root 用户。不同信任域才增设独立 worker/容器；不声称单进程具有 OS 级多租户隔离。审计/备份在工程之外独立存储。MCP server 不使用进程级 chdir。
 
 ## 6. 工程与工作空间模型
 
 示例主机目录：
 ```text
-/data/workspace/
-  aidevor/
+/srv/cat/projects/
+  demo-app/
     server/
     web/
     doc/
-  cat/
-  api-server/
+  demo-tools/
+  demo-lib/
 /var/lib/cat/   # 状态、日志和恢复对象，不暴露给工具
 ```
 
@@ -123,7 +153,7 @@ Workspace ID 为不可预测随机 ID，必须绑定登录主体；每次请求�
 1. 参数 path 默认相对 cwd，可用 path_base=root 从工程根定位；不接受服务器绝对路径、URL、NUL、Windows 驱动器/UNC 等歧义形式。
 2. CWD 是逻辑路径；set_cwd 支持 '.'、'..' 和子目录，但不得越出工程根。永远不切换系统进程工作目录。
 3. 每次返回 project_id、workspace_id、cwd、cwd_version、规范化项目相对路径。写调用必须传 cwd_version 或显式 path_base=root。CWD 改变则旧相对写请求返回 CWD_CONFLICT。
-4. symlink 默认禁止穿越及写入（可以显示其为链接但不返回外部目标）；拒绝特殊设备、FIFO、socket、未获授权子挂载、危险 hardlink。Linux 使用 fd-relative / openat2 RESOLVE_BENEATH、NO_SYMLINKS、NO_MAGICLINKS（视支持情况）和安全父目录 fd；不能仅靠 realpath 检查后再按字符串访问。Node 需要经过审查的 native helper 或受限 worker 实现该边界；无可靠后端则拒绝公网写。
+4. symlink 默认禁止穿越及写入（可以显示其为链接但不返回外部目标）；拒绝特殊设备、FIFO、socket、未获授权子挂载、危险 hardlink。Linux 使用 fd-relative / openat2 RESOLVE_BENEATH、NO_SYMLINKS、NO_MAGICLINKS（视支持情况）和安全父目录 fd；不能仅靠 realpath 检查后再按字符串访问。Python 使用 os.open(..., dir_fd=..., O_NOFOLLOW|O_DIRECTORY) 逐级打开父目录，文件操作使用安全目录 fd；Linux openat2 等增强按需采用经过审查的薄封装。注意仅检查字符串或逐级 fd 并不自动消除挂载及目录重命名竞态；结合 OS 级隔离、禁止不可信进程搬移根及祖先、测试边界。不满足边界则拒绝公网写。
 5. 根目录、目录祖先及目的路径全部授权校验；工程根本身不允许删除、移动或覆盖。
 
 ## 7. MCP 工具设计（V1 拟定契约）
@@ -259,72 +289,108 @@ AI 修改一个文件后检查回执及必要的回读，再修改下一个。�
 
 ## 12. 部署与配置
 
-推荐 Docker Compose 单机：reverse-proxy、cat-gateway、受控 project-worker、持久 SQLite/审计/备份卷；OAuth IdP 可外置。只有 proxy 暴露公网端口，worker 不能被外网直接调用。以下 YAML 为 Cat 拟定的配置格式，不是现成项目可执行配置。
+默认一个 Cat Python 进程及本地 SQLite、审计、备份目录，原生 uv/systemd 或 Docker 单容器部署；公网通过 TLS 反向代理及兼容 OAuth 服务接入。仅当跨信任域需要隔离时配置独立 worker。以下 TOML 为拟定配置格式，不是现成可运行配置。
 
-```yaml
-server:
-  listen: "127.0.0.1:8765"
-  public_url: "https://cat.example.com/mcp"
-auth:
-  issuer: "https://identity.example.com"
-  audience: "cat"
-  require_auth: true
-projects:
-  - id: aidevor
-    root: /data/workspace/aidevor
-    access: [read, write]
-  - id: cat
-    root: /data/workspace/cat
-    access: [read, write]
-limits:
-  directory_depth: 8
-  page_entries: 200
-  max_tool_response_bytes: 65536
-  max_inline_write_bytes: 262144
-  max_search_seconds: 10
-  max_search_results: 100
-  workspace_idle_seconds: 7200
-  max_concurrent_per_subject: 4
-  backup_retention_days: 7
-security:
-  allow_shell: false
-  follow_symlinks: false
-  allow_recursive_delete: false
-  deny_sensitive_files: true
+ ```toml
+[server]
+listen = "127.0.0.1:8765"
+public_url = "https://cat.example.com/mcp"
+
+[auth]
+issuer = "https://identity.example.com"
+audience = "cat"
+require_auth = true
+
+[[projects]]
+id = "demo-app"
+root = "/srv/cat/projects/demo-app"
+access = ["read", "write"]
+
+[[projects]]
+id = "demo-lib"
+root = "/srv/cat/projects/demo-lib"
+access = ["read"]
+
+[limits]
+directory_depth = 8
+page_entries = 200
+max_tool_response_bytes = 65536
+max_inline_write_bytes = 262144
+max_search_seconds = 10
+max_search_results = 100
+workspace_idle_seconds = 7200
+max_concurrent_per_subject = 4
+backup_retention_days = 7
+
+[security]
+allow_shell = false
+follow_symlinks = false
+allow_recursive_delete = false
+deny_sensitive_files = true
 ```
 
-实际授权由独立 ACL 配置或管理面定义，access 是项目允许动作上限，不是所有人自动获得权限。配置示例不能包含真实 IP、令牌或生产路径。管理员安装步骤：创建专用用户与测试工程→配置 ACL/IdP→部署镜像与挂载→证书和 DNS→MCP Inspector 测试→目标 ChatGPT 账户端到端→启用受限真实项目。升级锁版本、备份状态库、运行迁移、健康检查与回滚；SQLite 必须使用本地可靠磁盘，横向扩展改为 PostgreSQL 与跨进程锁后另行验证。
+实际授权由独立 ACL 配置或管理面定义，access 是项目允许动作上限，不是所有人自动获得权限。配置示例不能包含真实 IP、令牌或生产路径。管理员安装步骤：创建专用用户与测试工程→配置 ACL/IdP→部署镜像与挂载→证书和 DNS→MCP Inspector 测试→目标 ChatGPT 账户端到端→启用受限真实项目。升级锁版本、备份状态库、运行迁移、健康检查与回滚；SQLite 必须使用本地可靠磁盘，V1 不支持横向扩展或多 worker 并发写；如未来确有需求再单独设计。
 
 性能指标为目标而非实测：10 万文件测试工程，depth=1 目录页 P95 小于 500ms、64 KiB 文本读 P95 小于 300ms（服务端暖态、不含公网）；搜索 10 秒内返回结果或明确超时；单次结果默认 64 KiB，可调但不得超客户端限制。缓存目录与索引仅用于加速，写前必须查真实文件。无需预建全工程向量索引，V1 以实时文本搜索为主。
 
-## 13. 建议代码结构
+## 13. Python 项目结构与实现规则
 
 ```text
 cat/
+  README.md
+  README.zh-CN.md
+  LICENSE
+  CONTRIBUTING.md
+  SECURITY.md
+  THIRD_PARTY_NOTICES.md
+  CHANGELOG.md
+  pyproject.toml
+  uv.lock
+  .gitignore
+  config.example.toml
   docs/
-  src/
-    mcp/               # tool schemas, transport, error mapping
-    auth/              # token verification, ACL
-    projects/          # registry, discovery
-    workspace/         # session and virtual cwd
-    filesystem/        # safe path, read, write, edit, search
-    upstream/          # pinned engine adapters
-    operations/        # lock, journal, idempotency, recovery
-    audit/             # metadata and revisions
-    config/
-  worker/              # isolated filesystem backend
-  migrations/
-  tests/{unit,integration,security,e2e}/
-  deploy/{compose,proxy}/
+  src/cat_mcp/
+    __init__.py
+    __main__.py
+    server.py           # MCP 注册与 transport
+    config.py           # 配置校验
+    auth.py             # token 验证和授权
+    projects.py         # 工程注册与发现
+    workspace.py        # workspace_id、虚拟 cwd
+    schemas.py          # 输入输出模型
+    errors.py           # 统一错误
+    fs/
+      paths.py          # fd-relative 路径安全
+      directory.py      # 树和分页
+      reader.py         # 单文件、分段读取
+      editor.py         # 精确替换和单文件补丁
+      writer.py         # 原子写、移动、回收
+      search.py         # 有界搜索与 ripgrep 适配
+    state.py            # SQLite
+    operations.py       # 锁、版本、幂等、恢复
+    audit.py            # 审计与历史
+  tests/
+    unit/
+    integration/
+    security/
+    e2e/
+  deploy/
+    Dockerfile
+    compose.example.yml
+    cat.service.example
+  .github/workflows/
+    ci.yml
 ```
 
-模块边界：工具层不得直接访问 OS 文件；所有读写走统一 authorized resolver 与 worker，搜索同样受限；上游工具不得绕开协调器。尽量复用经过确认的编辑、diff、搜索算法，而不是未经审核直接接受上游的路径或写操作。
+V1 采用模块化单体，避免层层抽象及重型依赖注入框架。项目 import 名称 cat_mcp；CLI 拟使用 cat-mcp，避免与系统 cat 命令冲突。包发布名称需在发布前核实是否可用，不默认已注册。工具 handler 只做身份上下文、参数校验、业务调用及结果映射；业务文件访问全部通过安全路径层；状态/事务使用同一协调器。文件 I/O 在有界线程池运行，搜索使用固定 argv、受控子进程和超时；禁止 shell=True。ripgrep 仅在 OS 限定的工程范围内运行，且结果按统一路径与敏感数据策略重验；若无法避免进程读取禁止数据，改用安全文件描述符逐文件扫描。标准库 fallback 只提供有界字面量查询，正则不可用时返回能力限制，不静默采用无超时 Python re。数据库不跨线程共享未受保护连接，不持有数据库事务等待网络。
+
+代码实现优先清晰、短小、可独立测试；不要为了设计模式新增类。对安全、并发与恢复必须有明确注释、测试及错误语义。上游项目不是运行时依赖；严禁通过其未经审核的工具绕开 Cat 安全层。
 
 ## 14. 分阶段实施计划
 
 | 阶段 | 工作 | 通过条件 |
 |---|---|---|
-| P0-A 接入验证 | 锁定上游版本与许可；临时测试工程、HTTPS/OAuth、最小读写 MCP；ChatGPT/API 实测 | 有真实客户端读写回执，确认账户路线 |
+| P0-A 接入验证 | 初始化公开 Python 包、许可证/CI/配置模板；固定参考项目版本和许可；临时测试工程、HTTPS/OAuth、最小读写 MCP；ChatGPT/API 实测 | 有真实客户端读写回执，确认账户路线 |
 | P0-B 只读基座 | registry、ACL、workspace、cwd、目录分页、stat、分段读、搜索 | 两个工程/两会话隔离，大工程浏览与搜索通过 |
 | P0-C 写能力 | 单文件创建、覆盖、精确编辑、patch、mkdir、move/copy/trash；版本、锁、审计、恢复 | 并发冲突、断电/重试、权限和路径攻击测试通过 |
 | P1 工程增强 | 变更查询、diff、恢复、Git 只读、二进制分块、运维安装 | 可恢复删除、客户端分页、部署升级回滚验证 |
@@ -358,12 +424,12 @@ P0-A 与 P0-B 可有限并行（核心契约先固定）；P0-C 必须在安全�
 ## 16. 风险与待确认事项
 
 1. ChatGPT 套餐及工作空间是否支持自定义写工具是最大前置风险；无真实 endpoint、OAuth 配置及目标账号权限，当前无法完成联调。
-2. 上游候选尚未固定 commit/完成依赖审计和运行测试；j0hanz 是初选，不是已经验证安全的生产组件。若现有 API 无法安全嵌入，则走小型 fork 或 SDK 实现。
-3. 用户未指定服务器发行版、认证方式、项目数量或并发量；本方案采用 Linux、OAuth、单机持久状态及多工程的可调整默认设计。
+2. 参考项目尚未固定 commit/逐文件审查及运行测试；其设计可参考，不代表实现已验证安全。各模块使用 Python 独立实现，不依赖任何第三方完整文件 MCP。
+3. 默认 Linux、Python 3.12+、OAuth、单 owner、多工程及单进程持久状态；这些属于可调整的通用产品设计，实际支持矩阵需实测。
 4. 共享本地文件与外部编辑器存在竞态，严格保证依赖统一协调或隔离工作树；这是需要确认的运行模式。
 5. 文件读写与 Shell/编译执行分离是本方案主动收敛的边界。若要允许 AI 独立编译测试，应增加单独受控执行服务，不暴露任意 Shell。
-6. 协作协议文件未随本任务提供、Library 检索未定位；本轮仅按用户明确的 Cat 仓库授权交付设计提案，不执行本地操作，不宣称独立验收完成。
+6. 公开发布前须扫描全仓及 Git 历史；当前文档只使用通用虚构示例。历史提交不因文件更新而消失，发现秘密须撤销凭据并由维护者决定历史清理方案。
 
 ## 17. 结论
 
-Cat 的价值不是重新实现已有文件操作，而是把成熟文件 MCP 能力组织为公网可授权、具备工程上下文、可控上下文开销、单文件可靠写入、可审计恢复的工作空间服务。先验证 ChatGPT 真实接入，再复用 j0hanz/filesystem-mcp 的文件算法，并参考 local-mcp 的远程接入实践；在 Cat 的统一权限与事务层之下实现完整工具契约。GitHub 仍可用于版本管理，但不再是每次文件读取和修改的必经通道。
+Cat 的价值不是重新实现已有文件操作，而是把成熟文件 MCP 能力组织为公网可授权、具备工程上下文、可控上下文开销、单文件可靠写入、可审计恢复的工作空间服务。先验证目标 MCP 客户端的真实接入，再综合多个开源项目的实践，以 Python 自主实现完整工具契约，直接依赖官方 MCP SDK 与成熟通用组件。GitHub 仍可用于版本管理，但不再是每次文件读取和修改的必经通道。
