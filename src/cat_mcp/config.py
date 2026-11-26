@@ -18,6 +18,7 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -61,6 +62,16 @@ class ServerConfig(BaseModel):
             raise ValueError(
                 f"public_url must start with http:// or https://, got {v!r}"
             )
+        try:
+            parsed = urlparse(v)
+            if not parsed.netloc:
+                raise ValueError(
+                    f"public_url must have a non-empty host, got {v!r}"
+                )
+        except Exception as exc:
+            raise ValueError(
+                f"public_url is not a valid URL, got {v!r}"
+            ) from exc
         return v
 
 
@@ -218,16 +229,20 @@ class AppConfig(BaseModel):
 
     @staticmethod
     def _is_local_url(url: str) -> bool:
-        """Heuristic: is *url* likely a local/loopback address?"""
+        """Heuristic: is *url* likely a local/loopback address?
+
+        Uses urlparse to extract the hostname and checks it against
+        the known loopback / local addresses via exact match, not
+        substring matching — prevents bypass via subdomain tricks
+        like ``127.0.0.1.evil.com``.
+        """
         # 依据: Task-R-20261126012656435-P0
-        local_patterns = (
-            "127.0.0.1",
-            "localhost",
-            "0.0.0.0",
-            "::1",
-            "[::1]",
-        )
-        return any(p in url for p in local_patterns)
+        local_hosts = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1"})
+        try:
+            hostname = urlparse(url).hostname
+        except Exception:
+            return False
+        return hostname in local_hosts if hostname else False
 
 
 # ---------------------------------------------------------------------------
