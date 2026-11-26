@@ -6,18 +6,18 @@
 
 - :class:`QuotaManager` — 统一入口，封装并发、搜索、大小、超时配额
 - :func:`check_response_size` — 检查响应是否超限
-- :func:`bounded_execute` — 有界线程执行器（支持超时和取消）
+- :func:`check_concurrency` / :func:`release_concurrency` — 并发配额快捷函数
 
 用法::
 
-    from cat_mcp.fs.quota import QuotaManager, check_response_size
+    from cat_mcp.fs.quota import QuotaManager, check_concurrency, release_concurrency
 
-    mgr = QuotaManager(config.limits)
-    mgr.acquire_concurrency("user-abc")
+    check_concurrency("user-abc")
     try:
-        result = await mgr.run_with_timeout(10.0, some_async_fn)
+        mgr = QuotaManager(config.limits)
+        result = await mgr.run_async(some_async_fn, timeout=10.0)
     finally:
-        mgr.release_concurrency("user-abc")
+        release_concurrency("user-abc")
 
     check_response_size(data, max_bytes=65536)
 """
@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -100,7 +99,10 @@ class QuotaManager:
         """
         with self._concurrency_lock:
             current = self._concurrency.get(subject, 0)
-            if current <= 1:
+            if current <= 0:
+                logger.warning("release_concurrency called for subject with no slot: %s", subject)
+                return
+            if current == 1:
                 self._concurrency.pop(subject, None)
             else:
                 self._concurrency[subject] = current - 1
@@ -171,6 +173,8 @@ class QuotaManager:
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
+            future.cancel()
+            logger.warning("Task timed out after %ss (thread still running)", timeout)
             raise CatError(
                 ErrorCode.OPERATION_TIMEOUT,
                 f"Operation timed out after {timeout}s",
@@ -202,6 +206,8 @@ class QuotaManager:
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError:
+            future.cancel()
+            logger.warning("Task timed out after %ss (thread still running)", timeout)
             raise CatError(
                 ErrorCode.OPERATION_TIMEOUT,
                 f"Operation timed out after {timeout}s",
@@ -229,6 +235,11 @@ class QuotaManager:
     def max_response_bytes(self) -> int:
         """单次工具响应最大字节数。"""
         return self._limits.max_tool_response_bytes
+
+    @property
+    def max_concurrent_per_subject(self) -> int:
+        """每主体并发上限。"""
+        return self._limits.max_concurrent_per_subject
 
 
 # ---------------------------------------------------------------------------
@@ -274,15 +285,15 @@ def check_response_size(
             :attr:`QuotaManager.max_response_bytes`）。
 
     Raises:
-        CatError (TOO_LARGE): 数据超过上限。
+        CatError (RESPONSE_TOO_LARGE): 数据超过上限。
     """
     if max_bytes is None:
         max_bytes = get_quota_manager().max_response_bytes
 
-    size = len(data) if isinstance(data, (bytes, bytearray)) else len(data.encode())
+    size = len(data) if isinstance(data, (bytes, bytearray)) else len(data.encode("utf-8", errors="replace"))
     if size > max_bytes:
         raise CatError(
-            ErrorCode.FILE_TOO_LARGE,
+            ErrorCode.RESPONSE_TOO_LARGE,
             f"Response exceeds size limit ({size} > {max_bytes} bytes)",
         )
 
@@ -298,7 +309,7 @@ def check_concurrency(subject: str) -> None:
     """
     mgr = get_quota_manager()
     if not mgr.acquire_concurrency(subject):
-        limit = mgr._limits.max_concurrent_per_subject
+        limit = mgr.max_concurrent_per_subject
         raise CatError(
             ErrorCode.LIMIT_EXCEEDED,
             f"Concurrency limit reached ({limit} concurrent operations per subject)",
