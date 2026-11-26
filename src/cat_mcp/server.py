@@ -363,6 +363,14 @@ def create_app(
 
     _register_cat_directory_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File reader (CAT-14) — stat and segmented read
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656446-P0
+    from cat_mcp.fs.reader import _register_cat_reader_tools
+
+    _register_cat_reader_tools(server, manager, _access_checker)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

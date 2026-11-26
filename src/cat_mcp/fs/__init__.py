@@ -2,6 +2,7 @@
 
 提供 fd-relative 安全路径解析、目录遍历、文件读取、配额管理、敏感文件保护等文件操作能力。
 """
+# 依据: Task-R-20261126012656446-P0
 
 from cat_mcp.fs.paths import SecurePathResolver, ResolvedPath
 from cat_mcp.fs.quota import (
@@ -12,6 +13,7 @@ from cat_mcp.fs.quota import (
     set_quota_manager,
     get_quota_manager,
 )
+from cat_mcp.fs.reader import FileReader
 from cat_mcp.fs.sensitive import SensitiveFileChecker, is_sensitive, set_checker, get_checker
 from cat_mcp.fs.directory import DirectoryLister
 
@@ -24,6 +26,7 @@ __all__ = [
     "release_concurrency",
     "set_quota_manager",
     "get_quota_manager",
+    "FileReader",
     "SensitiveFileChecker",
     "is_sensitive",
     "set_checker",
