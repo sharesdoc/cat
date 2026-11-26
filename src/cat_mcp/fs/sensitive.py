@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import re
 from pathlib import PurePosixPath
 from typing import ClassVar
 
@@ -65,7 +64,8 @@ _DEFAULT_DENY_PATTERNS: list[str] = [
     ".git-credentials",
     # 生产配置
     "config/secrets.*",
-    "secret*",
+    "secrets.*",
+    "secret",
     # Kubernetes
     "*.kubeconfig",
     "kubeconfig",
@@ -153,26 +153,34 @@ class SensitiveFileChecker:
         Returns:
             ``True`` 如果路径应被拒绝访问。
         """
-        # 规范化路径（去除前导 ./、解析 ..）
+        # 规范化路径：归一化 .. 段（防止 ../ 绕过目录前缀模式）
+        # 并统一小写（macOS APFS 大小写不敏感，防止 .ENV 绕过 .env）
         normalized = PurePosixPath(path).as_posix()
+        # 用 os.path.normpath 解析纯词法的 .. 段（不访问文件系统）
+        normalized = os.path.normpath(normalized)
+        # 归一化后仍以 .. 开头 → 路径越过工程根，直接拒绝
+        if normalized.startswith(".."):
+            return True
+        lower = normalized.lower()
 
         # 检查单个组件是否匹配模式
         def _match(pattern: str, p: str) -> bool:
-            # 先匹配全路径
-            if fnmatch.fnmatch(p, pattern):
+            pattern_lower = pattern.lower()
+            # 先匹配全路径（小写）
+            if fnmatch.fnmatch(p, pattern_lower):
                 return True
-            # 再匹配每个路径组件（含自身）
+            # 再匹配每个路径组件（含自身，小写）
             parts = PurePosixPath(p).parts
-            return any(fnmatch.fnmatch(part, pattern) for part in parts)
+            return any(fnmatch.fnmatch(part, pattern_lower) for part in parts)
 
         # 第一轮：先检查例外模式。任一例外匹配 → 直接允许
         for pattern, is_allow in self._rules:
-            if is_allow and _match(pattern, normalized):
+            if is_allow and _match(pattern, lower):
                 return False
 
         # 第二轮：再检查拒绝模式。任一拒绝匹配 → 拒绝
         for pattern, is_allow in self._rules:
-            if not is_allow and _match(pattern, normalized):
+            if not is_allow and _match(pattern, lower):
                 return True
 
         # 无匹配 → 允许
