@@ -161,7 +161,9 @@ class StateManager:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        # 物理外键禁用：REFERENCES 仅作文档性声明，引用完整性由应用层保证
+        # 依据: Task-R-20261126012656439-P0
+        self._conn.execute("PRAGMA foreign_keys=OFF")
         self.run_migrations()
 
     # ------------------------------------------------------------------
