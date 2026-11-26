@@ -159,6 +159,9 @@ class ProjectRegistry:
         Existing projects are updated (display name, root path); new
         projects are created.  The project ID is the stable, immutable
         key supplied by configuration.
+
+        Access scopes declared in the configuration are also synchronised
+        to the grants table for a system-level subject ("*admin*").
         """
         # 依据: Task-R-20261126012656440-P0
         for entry in self._config.projects:
@@ -176,6 +179,19 @@ class ProjectRegistry:
                     id=entry.id,
                     display_name=display_name,
                     root_path=entry.root,
+                )
+
+            # Synchronise access scopes from configuration into grants.
+            # Uses a fixed pseudo-subject ("*config*") so operator-declared
+            # grants can be distinguished from runtime grants.
+            # 依据: Task-R-20261126012656440-P0
+            scopes = ",".join(entry.access) if entry.access else "read"
+            existing_grants = self._state.get_grants("*config*", entry.id)
+            if not existing_grants:
+                self._state.create_grant(
+                    subject="*config*",
+                    project_id=entry.id,
+                    scopes=scopes,
                 )
 
     # ------------------------------------------------------------------
@@ -273,19 +289,30 @@ class ProjectRegistry:
             "next_cursor": _encode_cursor(end) if has_more else None,
         }
 
-    def get_project(self, project_id: str) -> dict[str, Any] | None:
+    def get_project(self, project_id: str, subject: str | None = None) -> dict[str, Any] | None:
         """Look up a project by its stable ID.
 
-        .. note::
-            This method does **not** perform an authorisation check; the
-            caller must verify that the requesting subject is allowed to
-            access the project.
+        When *subject* is provided the call also verifies that the
+        subject has a valid grant for the project; if not, returns
+        ``None``.
+
+        .. warning::
+            Callers that already performed an authorisation check may
+            pass ``subject=None``, but this should be rare.
 
         Returns:
-            The project record as a dict, or ``None`` if not found.
+            The project record as a dict, or ``None`` if not found or
+            not authorised.
         """
         # 依据: Task-R-20261126012656440-P0
-        return self._state.get_project(project_id)
+        row = self._state.get_project(project_id)
+        if row is None:
+            return None
+        if subject is not None:
+            grants = self._state.get_grants(subject, project_id)
+            if not grants:
+                return None
+        return row
 
     # ------------------------------------------------------------------
     # Discovery (optional — stub)
