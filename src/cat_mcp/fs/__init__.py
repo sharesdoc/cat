@@ -13,6 +13,7 @@ from cat_mcp.fs.quota import (
     get_quota_manager,
 )
 from cat_mcp.fs.sensitive import SensitiveFileChecker, is_sensitive, set_checker, get_checker
+from cat_mcp.fs.directory import DirectoryLister
 
 __all__ = [
     "SecurePathResolver",
@@ -27,4 +28,5 @@ __all__ = [
     "is_sensitive",
     "set_checker",
     "get_checker",
+    "DirectoryLister",
 ]

@@ -355,6 +355,14 @@ def create_app(
     _workspace_mgr = WorkspaceManager(manager, _access_checker, idle_seconds=config.limits.workspace_idle_seconds)
     _register_cat_workspace_tools(server, _workspace_mgr)
 
+    # ------------------------------------------------------------------
+    # Directory listing (CAT-13)
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656445-P0
+    from cat_mcp.fs.directory import _register_cat_directory_tools
+
+    _register_cat_directory_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
