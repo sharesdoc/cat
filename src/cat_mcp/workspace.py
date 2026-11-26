@@ -22,6 +22,7 @@ from typing import Any
 from cat_mcp.errors import CatError, ErrorCode
 from cat_mcp.state import StateManager
 from cat_mcp.acl import AccessChecker
+from cat_mcp.fs.paths import _validate_path_format, _normalize
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,11 @@ class WorkspaceManager:
                 "Not authorized to access this project",
             )
 
-        # 3. 创建 workspace
+        # 3. 校验 cwd 参数格式（如果有）
+        if cwd is not None:
+            _validate_path_format(cwd)
+
+        # 4. 创建 workspace
         initial_cwd = cwd if cwd else "."
         expires_at = self._compute_expiry()
         workspace = self._state.create_workspace(
@@ -172,10 +177,18 @@ class WorkspaceManager:
         if project is None:
             raise CatError(ErrorCode.PROJECT_NOT_FOUND, "Project not found")
 
-        # 校验路径合法性（格式检查）
-        from cat_mcp.fs.paths import _validate_path_format
-
+        # 校验路径合法性（格式检查 + 不越根词法检查）
         _validate_path_format(path)
+        current_cwd = workspace.get("cwd", ".")
+        normalized = _normalize(path, base=current_cwd)
+        # os.path.normpath 解析 .. 段，然后检查是否越根
+        import os as _os
+        normalized_real = _os.path.normpath(normalized)
+        if normalized_real.startswith(".."):
+            raise CatError(
+                ErrorCode.PATH_OUT_OF_BOUNDS,
+                "Path escapes project root",
+            )
 
         # 执行 CAS 更新
         updated = self._state.update_workspace_cwd(
@@ -258,10 +271,18 @@ class WorkspaceManager:
                 "Workspace is not active",
             )
 
-        expires_at = workspace.get("expires_at")
-        if expires_at:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "000Z"
-            if expires_at < now:
+        # 授权重校验（防止打开后授权被撤销）
+        project_id = workspace.get("project_id", "")
+        if not self._checker.check(subject, project_id, ".", "read"):
+            raise CatError(
+                ErrorCode.FORBIDDEN,
+                "Authorization revoked for this project",
+            )
+
+        expires_at_str = workspace.get("expires_at")
+        if expires_at_str:
+            expires_dt = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(timezone.utc):
                 raise CatError(
                     ErrorCode.WORKSPACE_EXPIRED,
                     "Workspace has expired",
