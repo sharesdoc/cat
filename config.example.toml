@@ -1,0 +1,40 @@
+# Cat MCP Server — Example Configuration
+#
+# Copy this file to config.toml and adjust for your environment.
+# All values shown are example placeholders — do not use them directly.
+
+[server]
+listen = "127.0.0.1:8765"
+public_url = "https://cat.example.com/mcp"
+
+[auth]
+issuer = "https://identity.example.com"
+audience = "cat"
+require_auth = true
+
+[[projects]]
+id = "demo-app"
+root = "/srv/cat/projects/demo-app"
+access = ["read", "write"]
+
+[[projects]]
+id = "demo-lib"
+root = "/srv/cat/projects/demo-lib"
+access = ["read"]
+
+[limits]
+directory_depth = 8
+page_entries = 200
+max_tool_response_bytes = 65536
+max_inline_write_bytes = 262144
+max_search_seconds = 10
+max_search_results = 100
+workspace_idle_seconds = 7200
+max_concurrent_per_subject = 4
+backup_retention_days = 7
+
+[security]
+allow_shell = false
+follow_symlinks = false
+allow_recursive_delete = false
+deny_sensitive_files = true
