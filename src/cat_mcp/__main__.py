@@ -2,14 +2,17 @@
 
 Parses command-line arguments, loads configuration from TOML (or built‑in
 defaults), prints a non‑sensitive configuration summary, and starts the
-server.
+ASGI application via Uvicorn using the Streamable HTTP transport.
 """
 # 依据: Task-R-20261126012656435-P0
+# 依据: Task-R-20261126012656436-P0
 
 from __future__ import annotations
 
 import argparse
 import sys
+
+import uvicorn
 
 
 def _print_config_summary(cfg: object) -> None:
@@ -105,12 +108,21 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_config_summary(config)
 
-    # TODO: Start the MCP server
-    # server = get_server(config)
-    # server.run()
+    # Create the ASGI app from configuration
+    # 依据: Task-R-20261126012656436-P0
+    from cat_mcp.server import create_app
 
-    print("cat-mcp: server not yet implemented", file=sys.stderr)
-    return 1
+    app = create_app(config)
+    host, port_str = config.server.listen.rsplit(":", 1)
+    port = int(port_str)
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+    )
+    return 0
 
 
 if __name__ == "__main__":
