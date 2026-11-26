@@ -133,6 +133,9 @@ class AccessChecker:
             allowed_raw: str = grant.get("allowed_prefixes", "/")
             for prefix in allowed_raw.split(","):
                 prefix_stripped = prefix.strip()
+                # "/" 作为前缀表示匹配整个工程
+                if prefix_stripped == "/":
+                    return True
                 if path == prefix_stripped or path.startswith(prefix_stripped + "/"):
                     return True
 

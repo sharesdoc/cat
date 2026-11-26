@@ -346,6 +346,15 @@ def create_app(
     _quota_mgr = QuotaManager(config.limits)
     set_quota_manager(_quota_mgr)
 
+    # ------------------------------------------------------------------
+    # Workspace manager
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656444-P0
+    from cat_mcp.workspace import WorkspaceManager, _register_cat_workspace_tools
+
+    _workspace_mgr = WorkspaceManager(manager, _access_checker, idle_seconds=config.limits.workspace_idle_seconds)
+    _register_cat_workspace_tools(server, _workspace_mgr)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
