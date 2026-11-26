@@ -163,7 +163,7 @@ def cat_tool(
                             text=json.dumps(
                                 _failure(
                                     error_code=ErrorCode.INTERNAL_ERROR.value,
-                                    message=str(exc),
+                                    message="Internal server error",  # 脱敏，详情见日志
                                 ),
                                 ensure_ascii=False,
                             ),

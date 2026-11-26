@@ -113,8 +113,15 @@ def main(argv: list[str] | None = None) -> int:
     from cat_mcp.server import create_app
 
     app = create_app(config)
-    host, port_str = config.server.listen.rsplit(":", 1)
-    port = int(port_str)
+    # 支持 IPv6 地址（如 [::1]:8765）
+    # 依据: Task-R-20261126012656436-P0
+    listen = config.server.listen
+    if listen.startswith("["):
+        host = listen.split("]")[0][1:]
+        port = int(listen.split("]")[1].lstrip(":"))
+    else:
+        host, port_str = listen.rsplit(":", 1)
+        port = int(port_str)
 
     uvicorn.run(
         app,
