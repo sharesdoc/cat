@@ -1,6 +1,14 @@
-# C — 前端设计文档
+# C-前端设计文档
+
+> 项目：Cat — 远程工程文件系统 MCP 服务
+> 版本：v1.0
+> 日期：2026-11-26
+
+## 总述
 
 Cat 的交互前端是 AI MCP 客户端（如 ChatGPT Web、OpenAI Responses API、Claude Code、Codex 等）。Cat 本身不提供 Web UI 或图形界面，而是以 MCP 工具（Tool）方式暴露文件系统能力，由 AI 客户端发现和调用。本文档描述 MCP 协议层的工具契约设计，是 Cat 的"前端"接口规范。
+
+---
 
 ## 1. 修订记录
 
