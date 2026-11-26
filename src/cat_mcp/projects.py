@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 # middleware) into the MCP tool handler that runs in the same implicit task.
 # This avoids threading ASGI scope through the SDK's handler layer.
 
+# 依据: Task-R-20261126012656441-P0
+_current_auth_scopes: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "cat_current_auth_scopes"
+)
+
 _current_subject: contextvars.ContextVar[str] = contextvars.ContextVar(
     "cat_current_subject"
 )
@@ -66,17 +71,46 @@ def get_current_subject() -> str:
         )
 
 
+def set_current_auth_scopes(scopes: list[str] | None) -> None:
+    """Set the current request's OAuth scopes.
+
+    Called by the ASGI middleware in :func:`create_app` after auth
+    verification.  Pass ``None`` when auth is bypassed (loopback /
+    development mode).
+
+    Args:
+        scopes: OAuth scopes from the token, or ``None`` if auth is
+            bypassed.
+    """
+    # 依据: Task-R-20261126012656441-P0
+    _current_auth_scopes.set(scopes)
+
+
+def get_current_auth_scopes() -> list[str] | None:
+    """Return the current request's OAuth scopes.
+
+    Returns:
+        A list of scope strings if authentication was performed, or
+        ``None`` if auth was bypassed (loopback / development mode).
+    """
+    # 依据: Task-R-20261126012656441-P0
+    try:
+        return _current_auth_scopes.get()
+    except LookupError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # ASGI middleware for subject context propagation
 # ---------------------------------------------------------------------------
 
 
 class SubjectContextMiddleware:
-    """ASGI middleware that extracts the authenticated subject from the
-    ASGI scope and stores it in the per-request context var.
+    """ASGI middleware that extracts the authenticated subject and OAuth
+    scopes from the ASGI scope and stores them in per-request context vars.
 
     Must be placed **after** ``AuthMiddleware`` in the middleware chain so
-    that ``scope["user"]`` is already populated.
+    that ``scope["user"]`` and ``scope["auth_info"]`` are already populated.
 
     Usage::
 
@@ -93,11 +127,22 @@ class SubjectContextMiddleware:
         self._app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        """ASGI entry point — propagate subject if present."""
+        """ASGI entry point — propagate subject and scopes if present."""
+        # 依据: Task-R-20261126012656441-P0
         if scope["type"] == "http":
             subject: str | None = scope.get("user")
             if subject:
                 set_current_subject(subject)
+
+            # Propagate OAuth scopes from auth_info for ACL intersection
+            auth_info: dict | None = scope.get("auth_info")
+            if auth_info:
+                scopes: list[str] | None = auth_info.get("scopes")
+                set_current_auth_scopes(scopes)
+            else:
+                # Auth bypassed (loopback / development) — set None so ACL
+                # skips OAuth scope intersection
+                set_current_auth_scopes(None)
         await self._app(scope, receive, send)
 
 

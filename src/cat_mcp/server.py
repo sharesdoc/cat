@@ -189,6 +189,27 @@ def cat_tool(
 
 
 # ---------------------------------------------------------------------------
+# AccessChecker singleton (module-level for tool handler access)
+# ---------------------------------------------------------------------------
+
+_access_checker: Any = None
+
+
+def get_access_checker() -> Any:
+    """Return the global ``AccessChecker`` instance.
+
+    Raises:
+        RuntimeError: If ``create_app`` has not been called yet.
+    """
+    # 依据: Task-R-20261126012656441-P0
+    if _access_checker is None:
+        raise RuntimeError(
+            "AccessChecker not initialised — call create_app() first"
+        )
+    return _access_checker
+
+
+# ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
 
@@ -306,6 +327,15 @@ def create_app(
 
     registry = ProjectRegistry(manager, config)
     _register_cat_list_projects(server, registry)
+
+    # ------------------------------------------------------------------
+    # AccessChecker (ACL)
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656441-P0
+    from cat_mcp.acl import AccessChecker
+
+    global _access_checker
+    _access_checker = AccessChecker(manager)
 
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
