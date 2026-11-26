@@ -369,7 +369,7 @@ def create_app(
     # 依据: Task-R-20261126012656446-P0
     from cat_mcp.fs.reader import _register_cat_reader_tools
 
-    _register_cat_reader_tools(server, manager, _access_checker)
+    _register_cat_reader_tools(server, _workspace_mgr, manager)
 
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()

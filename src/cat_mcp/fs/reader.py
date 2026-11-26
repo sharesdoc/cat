@@ -764,15 +764,14 @@ def _trim_to_utf8_chars(data: bytes, encoding: str) -> bytes:
 
 def _register_cat_reader_tools(
     server: Any,
+    workspace_mgr: Any,
     state: Any,
-    access_checker: Any,
 ) -> None:
     """注册 ``cat_stat`` 和 ``cat_read_file`` 工具。
 
     Args:
         server: ``MCPServer`` 实例。
-        state: ``StateManager`` 实例。
-        access_checker: ``AccessChecker`` 实例。
+        workspace_mgr: ``WorkspaceManager`` 实例（用于 workspace 归属/过期校验）。
     """
     from cat_mcp.server import cat_tool
     from cat_mcp.projects import get_current_subject
@@ -796,14 +795,8 @@ def _register_cat_reader_tools(
         # 依据: Task-R-20261126012656446-P0
         subject = get_current_subject()
 
-        # 验证 workspace 访问
-        if not access_checker.check_workspace(subject, workspace_id, "read"):
-            raise CatError(ErrorCode.FORBIDDEN, "Not authorized")
-
-        # 获取 workspace 和 project 信息
-        workspace = state.get_workspace(workspace_id)
-        if workspace is None:
-            raise CatError(ErrorCode.WORKSPACE_NOT_FOUND, "Workspace not found")
+        # 通过 WorkspaceManager 验证 workspace 归属/过期
+        workspace = workspace_mgr.get_workspace(subject, workspace_id)
 
         project_id = workspace.get("project_id", "")
         project = state.get_project(project_id)
@@ -852,14 +845,8 @@ def _register_cat_reader_tools(
         # 依据: Task-R-20261126012656446-P0
         subject = get_current_subject()
 
-        # 验证 workspace 访问
-        if not access_checker.check_workspace(subject, workspace_id, "read"):
-            raise CatError(ErrorCode.FORBIDDEN, "Not authorized")
-
-        # 获取 workspace 和 project 信息
-        workspace = state.get_workspace(workspace_id)
-        if workspace is None:
-            raise CatError(ErrorCode.WORKSPACE_NOT_FOUND, "Workspace not found")
+        # 通过 WorkspaceManager 验证 workspace 归属/过期
+        workspace = workspace_mgr.get_workspace(subject, workspace_id)
 
         project_id = workspace.get("project_id", "")
         project = state.get_project(project_id)

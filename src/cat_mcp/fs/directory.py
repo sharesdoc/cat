@@ -20,7 +20,6 @@ glob 过滤、敏感文件跳过和有界快照分页。
 from __future__ import annotations
 
 import base64
-import errno
 import hashlib
 import json
 import logging
@@ -33,7 +32,7 @@ from typing import Any, Callable
 import pathspec
 
 from cat_mcp.errors import CatError, ErrorCode
-from cat_mcp.fs.paths import SecurePathResolver
+from cat_mcp.fs.paths import SecurePathResolver, _raise_cat_error
 from cat_mcp.fs.sensitive import SensitiveFileChecker
 
 logger = logging.getLogger(__name__)
@@ -202,23 +201,6 @@ def _compile_glob(pattern: str) -> Callable[[str], bool]:
     return _match
 
 
-def _raise_cat_error(exc: OSError, path: str) -> None:
-    """将 ``OSError`` 映射为 ``CatError``。
-
-    Args:
-        exc: 原始操作系统异常。
-        path: 操作路径（用于错误消息）。
-
-    Raises:
-        CatError: 总是抛出。
-    """
-    if exc.errno == errno.ENOENT:
-        raise CatError(ErrorCode.FILE_NOT_FOUND, str(exc)) from exc
-    if exc.errno in (errno.EACCES, errno.EPERM):
-        raise CatError(ErrorCode.FORBIDDEN, str(exc)) from exc
-    if exc.errno == errno.ELOOP:
-        raise CatError(ErrorCode.UNSAFE_PATH, str(exc)) from exc
-    raise CatError(ErrorCode.OPERATION_FAILED, str(exc)) from exc
 
 
 def _entry_sort_key(entry: DirEntry) -> tuple:
@@ -296,8 +278,6 @@ class DirectoryLister:
                      条目被包含（如 ``"*.py"``）。
             exclude: 排除过滤 glob 模式。路径**名称**匹配该模式的
                      条目被排除（优先于 include）。
-            responsive_large_dir: 对于包含大量文件的目录，是否主动截断
-                以避免超时（默认启用；设为 ``False`` 关闭）。
 
         Returns:
             字典包含:
