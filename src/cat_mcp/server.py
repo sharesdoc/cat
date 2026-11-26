@@ -21,6 +21,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from cat_mcp import __version__
 from cat_mcp.config import AppConfig
 from cat_mcp.errors import CatError, ErrorCode
+from cat_mcp.state import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,12 @@ def _register_cat_get_capabilities(server: MCPServer, config: AppConfig) -> None
 # ---------------------------------------------------------------------------
 
 
-def create_app(config: AppConfig) -> "Starlette":
+def create_app(
+    config: AppConfig,
+    *,
+    state: StateManager | None = None,
+    db_path: str = "/var/lib/cat/state.db",
+) -> "Starlette":
     """Create and configure the Cat MCP server ASGI application.
 
     Initialises an ``MCPServer`` instance, registers all Cat tools, and
@@ -265,18 +271,41 @@ def create_app(config: AppConfig) -> "Starlette":
 
     Args:
         config: Application configuration (limits, auth, security, etc.).
+        state: Optional pre-configured ``StateManager``.  If omitted, one
+            is created from *db_path*.
+        db_path: Path to the SQLite state database used when *state* is
+            not provided.
 
     Returns:
         A configured Starlette ASGI application.
     """
     # 依据: Task-R-20261126012656436-P0
+    # 依据: Task-R-20261126012656440-P0
     server = MCPServer(
         name="cat-mcp",
         version=__version__,
     )
 
     _register_cat_get_capabilities(server, config)
-    # Future tools are registered here as _register_*() calls.
+
+    # ------------------------------------------------------------------
+    # State management
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656440-P0
+    manager = state if state is not None else StateManager(db_path=db_path)
+
+    # ------------------------------------------------------------------
+    # Project registry
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656440-P0
+    from cat_mcp.projects import (
+        SubjectContextMiddleware,
+        ProjectRegistry,
+        _register_cat_list_projects,
+    )
+
+    registry = ProjectRegistry(manager, config)
+    _register_cat_list_projects(server, registry)
 
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
@@ -293,6 +322,13 @@ def create_app(config: AppConfig) -> "Starlette":
     # Wrap with auth middleware (handles Bearer token validation, Host
     # header checks, and loopback bypass for development).
     app = create_auth_middleware(app, config)
+
+    # ------------------------------------------------------------------
+    # Subject context middleware (propagates authenticated subject into
+    # the request-local context var for MCP tool handlers).
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656440-P0
+    app = SubjectContextMiddleware(app)
 
     # Append OAuth Protected Resource Metadata endpoint (RFC 9728) using
     # the SDK's standard route factory.
