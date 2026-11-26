@@ -129,11 +129,11 @@ class AccessChecker:
             if oauth_scope_set is not None and action not in oauth_scope_set:
                 continue
 
-            # 7. 路径前缀校验
+            # 7. 路径前缀校验（精确边界匹配，防止 /src 匹配 /src-evil）
             allowed_raw: str = grant.get("allowed_prefixes", "/")
             for prefix in allowed_raw.split(","):
                 prefix_stripped = prefix.strip()
-                if path.startswith(prefix_stripped):
+                if path == prefix_stripped or path.startswith(prefix_stripped + "/"):
                     return True
 
         # deny-by-default
@@ -185,6 +185,20 @@ class AccessChecker:
         if expires_at:
             now = _now_str()
             if expires_at < now:
+                return False
+
+        # 工程授权校验：验证 subject 对 workspace 所属 project 有 grant
+        project_id: str | None = workspace.get("project_id")
+        if project_id:
+            grants = self._state.get_grants(subject, project_id)
+            if not grants:
+                return False
+            # 动作必须在 grant scopes 内
+            for grant in grants:
+                grant_scopes: str = grant.get("scopes", "")
+                if action in grant_scopes.split(","):
+                    break
+            else:
                 return False
 
         # OAuth scope 校验

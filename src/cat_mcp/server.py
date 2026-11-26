@@ -349,16 +349,16 @@ def create_app(
         create_protected_resource_route,
     )
 
-    # Wrap with auth middleware (handles Bearer token validation, Host
-    # header checks, and loopback bypass for development).
-    app = create_auth_middleware(app, config)
-
-    # ------------------------------------------------------------------
-    # Subject context middleware (propagates authenticated subject into
-    # the request-local context var for MCP tool handlers).
-    # ------------------------------------------------------------------
-    # 依据: Task-R-20261126012656440-P0
+    # Subject context middleware — inner layer: runs AFTER auth has set
+    # scope["user"] / scope["auth_info"] so it can propagate them into
+    # request-local context vars for MCP tool handlers.
+    # 依据: Task-R-20261126012656441-P0
     app = SubjectContextMiddleware(app)
+
+    # Auth middleware — outer layer: runs first on each request.  Handles
+    # Bearer token validation, Host header checks, and loopback bypass.
+    # 依据: Task-R-20261126012656441-P0
+    app = create_auth_middleware(app, config)
 
     # Append OAuth Protected Resource Metadata endpoint (RFC 9728) using
     # the SDK's standard route factory.
