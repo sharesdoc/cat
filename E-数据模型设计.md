@@ -1,200 +1,192 @@
 # E-数据模型设计
 
-> 项目：Cat — 远程工程文件系统 MCP 服务
-> 版本：v1.0
+> 项目：Cat — 远程工程文件系统 MCP 服务  
+> 版本：v1.1（设计审查修订；尚未实现）  
 > 日期：2026-11-26
 
 ## 总述
 
-Cat 系统的数据模型围绕六个核心领域组织：工程注册（Project）、访问授权（Grant）、工作空间会话（Workspace）、写操作事务（Operation）、版本快照（Revision）和审计追踪（Audit），外加配置模型、路径模型与错误模型。所有实体持久化于单进程 SQLite（WAL 模式），不使用独立数据库服务器。数据模型遵循"逻辑外键、应用层约束"原则，禁用物理外键。ID 字段使用不可预测随机值（UUID / secrets.token_urlsafe），防御枚举攻击。配置通过 TOML 文件加载，部署者提供实际路径和身份提供商端点，所有真实路径、凭据和运行期数据不出现在公共仓库中。
-
----
+Cat 以 Project、Grant、Workspace、Operation、Revision、Audit 六个核心实体构成持久业务状态，采用本地 SQLite WAL，状态、备份及审计与工程目录隔离。授权、幂等和事务一致性是设计主线。P1 分块上传增加一个内部 UploadSession 实体，不引入新业务功能或热配置数据库。本文细化总体方案 v1.2 §6、§9–12、B 及 CAT-03/07/09/12/17–19/27/33；表字段与 F 一致，公开工具契约见 C，流程与状态机见 D。
 
 ## 1. 修订记录
 
-| 版本 | 日期 | 修订内容 | 修订人 |
-|------|------|----------|--------|
-| v1.0 | 2026-11-26 | 初稿 — 依据总体方案 §6、§11、§12 提取全部数据模型 | Cat |
-
----
+| 版本 | 日期 | 内容 |
+|---|---|---|
+| v1.0 | 2026-11-26 | 初稿，提取总体方案数据模型 |
+| v1.1 | 2026-11-26 | 修正授权交集、外键、租期、幂等范围、持久恢复清单、快照及审计；补足既有 P1 上传状态 |
 
 ## 2. 数据模型总览
 
-Cat 系统的核心领域围绕六个逻辑域组织，涵盖工程注册到访问授权、工作空间会话管理、写入操作事务、版本快照持久化以及全量审计追踪：
+六个核心实体共享一个状态数据库，使用物理外键和应用层业务约束相结合，禁止自动级联删除历史；Grant 撤销不删除已存在的 workspace 或历史操作，而是每次重验并拒绝后续访问。P1 UploadSession 绑定原工作空间及目标，不替代文件事务。状态数据不能通过文件工具读取。
 
-| 领域 | 核心实体 | 职责 |
-|------|----------|------|
-| **工程注册** | Project | 注册并管理被授权的真实工程目录，每个工程对应一个服务器文件系统路径 |
-| **授权** | Grant | 定义主体（AI/用户）对工程的访问范围、动作类型与有效期限 |
-| **工作空间** | Workspace | 维护 AI 在工程内的当前工作目录（CWD）、上下文版本和租期，不同会话隔离 |
-| **操作事务** | Operation | 记录每次写操作的元数据，支持幂等重试、版本冲突检测与崩溃恢复 |
-| **版本快照** | Revision | 保存写操作前后的文件内容引用，用于单文件回滚与差异对比 |
-| **审计** | Audit | 记录所有受控操作的调用方、操作、路径、结果与关联 ID |
+| 实体 | 物理表 | 关系及责任 |
+|---|---|---|
+| Project | projects | 1:N Grant、Workspace、Operation；管理员注册 |
+| Grant | grants | (subject, project_id) 唯一；当前有效权限 |
+| Workspace | workspaces | 独立 CWD、版本、空闲及绝对期限；1:N Operation |
+| Operation | operations | 复合幂等键；RESERVED/PREPARED/终态；1:N Revision/Audit |
+| Revision | revisions | 0..N 条快照/路径变更元数据，旧字节对象可选 |
+| Audit | audit_log | 0..N 事件；拒绝/发现可无工程、workspace 或 operation |
+| UploadSession（P1 内部） | upload_sessions | 工作空间及单目标绑定；分块暂存和最终 Operation 关联 |
 
-**实体关系概要：**
-- 一个 Project 包含 0..N 个 Grant，每个 Grant 绑定一个 subject（主体）。
-- 一个 subject 在一个 Project 上可打开 0..N 个 Workspace（不同 AI 独立）。
-- 一个 Workspace 产生 0..N 个 Operation（写操作事务）。
-- 一个 Operation 产生 0..N 个 Revision（写前快照、写后哈希）。
-- 一个 Operation 对应 1 条 Audit 记录或由 Audit 实体独立记录。
-
-所有实体**持久化**于 SQLite 数据库（`/var/lib/cat/` 下），MCP 工具只通过业务 API 间接访问；仅 Workspace 和 Operation 的部分字段暴露给 MCP 响应。
-
-**物理外键禁用原则**：实体间关系通过应用层逻辑维护，不建立 SQLite 物理外键约束。
-
----
+主键用 TEXT 非空；Project.id 由管理员配置稳定 ID 或首次生成后持久化（不依赖目录名）；workspace、operation、revision、audit、upload ID 由安全随机生成，不是授权凭据。主体取可信身份提供方标识（issuer 与 subject 的无歧义编码），不接受调用者自行声明。所有数据库时间统一固定宽度 UTC RFC3339 毫秒文本 YYYY-MM-DDTHH:mm:ss.sssZ；客户端可接收相同格式；时钟/期限由服务端管理。
 
 ## 3. 核心实体定义
 
 ### 3.1 Project（工程）
 
-**持久化**：是 | **暴露给 MCP 工具**：是（`cat_list_projects`、`cat_open_workspace`）
+工程只能由管理员注册、禁用或更新。扫描候选不等于授权。root_path/identity 不对外暴露。
 
-描述被管理的一个真实工程目录。由管理员通过配置或独立管理面注册，不接受 AI 任意路径。
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| id | TEXT PK | 稳定工程标识 |
+| display_name | TEXT NOT NULL | 显示名称 |
+| root_path | TEXT NOT NULL | 实际根绝对路径，内部专用 |
+| root_identity | TEXT NOT NULL | 规范根的设备/inode及适用挂载身份；路径字符串哈希不足以检测重建 |
+| enabled | INTEGER 0/1 | 启用标志 |
+| policy_id | TEXT NOT NULL | 当前安全策略标识，默认 default |
+| access | TEXT NOT NULL | JSON 动作数组；管理员配置上限的已验证快照 |
+| generation | INTEGER >=1 | 根、策略、配置授权上限变更递增；旧 workspace 失效 |
+| created_at, updated_at | TEXT NOT NULL | UTC 时间 |
 
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| id | TEXT | PK, NOT NULL, 唯一 | 工程标识符，不依赖目录名，管理员指定 |
-| display_name | TEXT | NOT NULL | 人可读的工程显示名，用于 MCP 工具返回 |
-| root_path | TEXT | NOT NULL | 工程在服务器上的真实绝对路径，如 `/srv/cat/projects/demo-app` |
-| root_identity | TEXT | NOT NULL | 工程根路径的确定性标识（如 realpath + 设备/inode），用于检测目录重命名/移动 |
-| enabled | INTEGER | NOT NULL, DEFAULT 1 | 布尔值，是否启用（1=启用，0=禁用） |
-| policy_id | TEXT | NOT NULL | 关联的安全策略标识符，控制路径解析规则（symlink、挂载、特殊文件等策略） |
-| generation | INTEGER | NOT NULL, DEFAULT 1 | 工程元数据版本号，每修改配置递增，用于检测并发配置变更 |
-
-**关系：** Project.id 被 Grant.project_id、Workspace.project_id 引用。
-
----
+配置为真源，启动和受控重新加载时对比并校验；根身份或配置不匹配 fail closed，不自动接受同路径替换。不得删除存在历史引用的工程记录，禁用优先。
 
 ### 3.2 Grant（授权）
 
-**持久化**：是 | **暴露给 MCP 工具**：否（仅服务端内部校验）
+Grant 是主体在工程内的显式 ACL。有效动作 = token scopes ∩ Grant.scopes ∩ Project.access；无等级继承，也不把 write 隐含成 delete/restore。所有动作必须同时满足路径边界、当前有效期和 denylist。
 
-定义主体对某个工程的访问授权。每次 MCP 工具调用均需重新校验。
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| subject | TEXT PK(复合) | 经认证的 issuer+sub |
+| project_id | TEXT PK(复合), FK | Project.id |
+| scopes | TEXT NOT NULL | JSON 数组，独立动作 discover/read/write/delete/restore/audit/workspace |
+| allowed_prefixes | TEXT NOT NULL | JSON 工程相对路径数组；["."] 为明确整个工程，[] 无路径授权，禁止 NULL 默认为全权 |
+| expires_at | TEXT NOT NULL | 明确授权期限，过期拒绝 |
+| created_at | TEXT NOT NULL | UTC 时间 |
 
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| subject | TEXT | NOT NULL | 授权主体标识符，来自 OAuth token 的 sub 声明 |
-| project_id | TEXT | NOT NULL, 引用 Project.id | 关联的工程 ID |
-| scopes | TEXT | NOT NULL | 逗号分隔的权限范围：`discover,read,write,delete,restore,audit` 等。取 OAuth scope 与 ACL 的并集 |
-| allowed_prefixes | TEXT | 可空 | 路径前缀白名单（JSON 数组），限制主体只能访问工程下特定子路径；空表示工程全部 |
-| expires_at | TEXT (ISO 8601) | NOT NULL | 授权到期时间戳，过期后所有操作返回 FORBIDDEN |
-
-**约束：**
-- (subject, project_id) 联合唯一。
-- scopes 值必须属于预定义动作集合：discover < read < write < delete < restore，不可自定义字符串。
-
----
+前缀按路径组件边界匹配，而非字符串 startswith；必要的祖先遍历仅限到获授权目标的安全导航，不授权读取其他祖先条目或兄弟目录。路径授权与当前 token/工程状态每次重验；拒绝时不暴露未授权项目存在性。
 
 ### 3.3 Workspace（工作空间）
 
-**持久化**：是 | **暴露给 MCP 工具**：是（`cat_open_workspace` 返回 id，后续工具通过 workspace_id 引用）
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| id | TEXT PK | 不可预测 workspace_id |
+| subject | TEXT NOT NULL | 创建主体 |
+| project_id | TEXT NOT NULL, FK | 所属工程 |
+| cwd | TEXT NOT NULL DEFAULT '.' | 规范工程相对目录 |
+| cwd_version | INTEGER >=1 | CAS 切换版本 |
+| project_generation | INTEGER >=1 | 打开时的工程 generation |
+| expires_at | TEXT NOT NULL | 当前有效期限=min(空闲期限, absolute_expires_at) |
+| absolute_expires_at | TEXT NOT NULL | 创建时确定的最长租期 |
+| status | TEXT NOT NULL | active/expired/closed |
+| created_at, last_used_at, updated_at | TEXT NOT NULL | 创建/最近成功授权活动/更新 |
 
-AI 在某个工程内打开的逻辑会话，维护虚拟当前工作目录（CWD）及上下文版本。
-
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| id | TEXT | PK, NOT NULL | 不可预测随机 ID（如 `ws_<urandom>`），不可自增，必须绑定登录主体 |
-| subject | TEXT | NOT NULL | 创建该 workspace 的主体标识，每次请求重验与当前 token subject 一致 |
-| project_id | TEXT | NOT NULL, 引用 Project.id | 关联的工程 ID |
-| cwd | TEXT | NOT NULL, DEFAULT '/' | 逻辑当前工作目录（相对工程根），不允许超出工程根 |
-| cwd_version | INTEGER | NOT NULL, DEFAULT 1 | CWD 变更版本号，每次 `cat_set_cwd` 递增；写工具传入此版本，不匹配则拒绝 |
-| project_generation | INTEGER | NOT NULL | 打开时的 Project.generation，工程配置变更后旧 workspace 失效 |
-| expires_at | TEXT (ISO 8601) | NOT NULL | 工作空间过期时间，建议空闲 2 小时、最长 24 小时（可配置） |
-| status | TEXT | NOT NULL, DEFAULT 'active' | 状态枚举：`active` / `idle` / `expired` / `closed` |
-
-**关系：** Workspace.id 被 Operation.workspace_id、Audit.workspace_id 引用。
-
-**约束**：
-- id 长度建议 32 字符以上，仅含小写字母、数字和下划线。
-- status 变动链路：active → idle（超时）→ expired；或 active → closed。
-- 同 subject 在不同 workspace 的 CWD 相互独立。
-
----
+默认空闲2小时、最长24小时，可配置；有效活动只刷新空闲截止时间并受绝对期限限制，重启不延长租期。原子 CAS 更新 cwd_version；不自动改变被移动/删除的 CWD，后续相对调用拒绝并要求重新选择目录。关闭/过期后不执行新变更；C 定义的原 workspace 查账例外仅查询已授权操作，不刷新租期。
 
 ### 3.4 Operation（操作事务）
 
-**持久化**：是 | **暴露给 MCP 工具**：是（`cat_get_operation` 返回状态和回执）
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| id | TEXT PK | 不可预测 operation_id |
+| subject, project_id, workspace_id | TEXT NOT NULL | 复合 FK 保证 workspace 归属 |
+| request_id | TEXT NOT NULL | 客户端稳定幂等 ID；与上述三字段联合唯一 |
+| input_digest | TEXT NOT NULL | 规范工具名及完整输入摘要 SHA-256；不存正文或令牌 |
+| operation_type | TEXT NOT NULL | write/edit/patch/mkdir/move/copy/trash/restore/begin_upload/upload_chunk/finish_upload/abort_upload |
+| path | TEXT NOT NULL | 首次解析的规范主路径 |
+| source_path, destination_path | TEXT 可空 | 双路径操作的规范源/目的；单路径无则 NULL |
+| project_generation | INTEGER >=1 | 首次受理的工程 generation |
+| cwd_version | INTEGER 可空 | 相对变更的上下文版本，root 定位可空 |
+| status | TEXT NOT NULL | RESERVED/PREPARED/COMMITTED/FAILED/IN_DOUBT |
+| before_version, expected_after_version, after_version | TEXT 可空 | 已核验前版本、预期后版本、实际后版本；不存在/非普通文件按 manifest 表达，非强制 SHA256 |
+| manifest_json | TEXT 可空 | PREPARED 前必须完整，记录所有影响路径、前后状态、根/对象身份、存在性、备份/暂存引用及恢复证据 |
+| result_json | TEXT 可空 | 终态必须保留安全结果/错误回执，确保同 ID 同参数可返回原结果；无源码、token 或内部路径 |
+| bytes | INTEGER >=0 | 操作字节数 |
+| started_at, prepared_at, completed_at | TEXT | UTC；started_at 必填，prepared_at 在 PREPARED 写入，终态 completed_at 必填 |
 
-记录一次写操作的生命周期，支持幂等重试、版本冲突检测与崩溃恢复。
+UNIQUE(subject, project_id, workspace_id, request_id)。请求摘要对已验证的结构参数规范化计算，首次路径绑定不因 CWD 改变而重解析；重放需当前授权，不同摘要拒绝。状态不等于客户端查询结果：RESERVED/PREPARED 对外为 IN_PROGRESS；UNKNOWN 仅为无可见记录的查询结果，不存作状态。
 
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| id | TEXT | PK, NOT NULL | 全局唯一操作 ID（如 `op_<urandom>`） |
-| subject | TEXT | NOT NULL | 发起该操作的主体标识 |
-| workspace_id | TEXT | NOT NULL, 引用 Workspace.id | 操作所属的工作空间 |
-| request_id | TEXT | NOT NULL, UNIQUE | 客户端提供的幂等请求 ID，用于重试检测 |
-| input_digest | TEXT | NOT NULL | 请求输入的 SHA-256 摘要，用于重放时校验参数是否一致；不同参数同 ID 返回 IDEMPOTENCY_CONFLICT |
-| path | TEXT | NOT NULL | 操作的目标路径（规范化后的相对路径） |
-| status | TEXT | NOT NULL | 状态枚举：`PREPARED` / `COMMITTED` / `FAILED` / `IN_DOUBT` |
-| before_version | TEXT | 可空（创建操作时为 NULL） | 操作前的文件版本哈希（SHA-256） |
-| after_version | TEXT | 可空（失败时 NULL） | 操作后的文件版本哈希（SHA-256） |
-| started_at | TEXT (ISO 8601) | NOT NULL | 操作开始时间 |
-| completed_at | TEXT (ISO 8601) | 可空 | 操作完成时间（COMMITTED/FAILED 时填充） |
-
-**关系：** Operation.id 被 Revision.operation_id、Audit.event_id（通过 correlation_id）引用。
-
-**状态机**：
+状态机：
+```mermaid
+stateDiagram-v2
+    [*] --> RESERVED
+    RESERVED --> PREPARED
+    RESERVED --> FAILED
+    RESERVED --> COMMITTED: 明确无实际文件变更
+    PREPARED --> COMMITTED
+    PREPARED --> FAILED: 明确未应用或可证明部分 mkdir
+    PREPARED --> IN_DOUBT
+    IN_DOUBT --> COMMITTED: 按证据恢复并审计
+    IN_DOUBT --> FAILED: 按证据确认未应用或明确效果
 ```
-PREPARED ──→ COMMITTED
-     │            │
-     └──→ FAILED  └──→ (只读不可变)
-     │
-     └──→ IN_DOUBT（崩溃恢复进入）
-```
 
----
+- RESERVED：已持久占用请求键，不允许更改工程目标。
+- PREPARED：首次可能改变目标前已持久记录完整恢复清单、旧对象、预计结果；目标是否已变更仍需核验。
+- COMMITTED：实际效果已持久化，最终状态、修订记录、安全回执和最终审计同一 SQLite 短事务提交。
+- FAILED：已明确终止，回执含已知效果（如多级 mkdir 部分成功），不代表一切都回滚。
+- IN_DOUBT：可能变更但无法确认或最终记录未能提交；冻结全部关联路径，保留恢复材料，等待核验。
+
+manifest_json 采用版本化内部对象（由 CAT-18/19 冻结）：schema_version、operation_type、root_identity、project_generation、paths[]（role/path/before/expected_after：exists/type/version/identity）、backup_refs、staging_refs、操作步骤与预期效果。mkdir 记录每一级预期/实际新增；move/trash 记录源和目标/内部回收对象；copy 记录源不变与目的新建；restore 记录快照和当前不存在或哈希条件。对象引用仅使用服务内部受限键，绝不允许客户端传入路径。不能从文件 hash 相等单独推导操作已执行；未决按 D/F 处理。
 
 ### 3.5 Revision（版本快照）
 
-**持久化**：是 | **暴露给 MCP 工具**：否（通过 `cat_diff_file`、`cat_restore_file` 间接访问）
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| id | TEXT PK | 随机 revision_id，授权后才返回 |
+| operation_id, project_id | TEXT NOT NULL | 与 Operation 的 ID/工程复合 FK |
+| path | TEXT NOT NULL | 该记录对应的规范工程相对路径 |
+| before_hash, after_hash | TEXT 可空 | 普通文件原始字节哈希；不存在/目录无普通文件哈希，NULL 合法 |
+| before_blob_ref | TEXT 可空 | 旧字节受保护对象键，不对外返回 |
+| mode | TEXT NOT NULL | create/replace/edit/patch/mkdir/move/copy/trash/restore |
+| availability | TEXT NOT NULL | AVAILABLE/EXPIRED/UNAVAILABLE/NONE，AVAILABLE 才能恢复 |
+| bytes | INTEGER >=0 | 旧对象字节数（无对象为0） |
+| expires_at, created_at | TEXT NOT NULL | 对象保留期限/创建时间 |
 
-保存写操作前后的文件内容引用，用于差异对比和单文件回滚。
-
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| id | TEXT | PK, NOT NULL | 全局唯一快照 ID（如 `rev_<urandom>`） |
-| operation_id | TEXT | NOT NULL, 引用 Operation.id | 关联的操作事务 ID |
-| before_blob_ref | TEXT | 可空（新建文件时为 NULL） | 操作前文件的备份对象引用（受限对象存储路径或 blob 键） |
-| after_hash | TEXT | NOT NULL | 操作后文件内容的 SHA-256 哈希 |
-| mode | TEXT | NOT NULL | 操作模式枚举：`create` / `replace` / `edit` / `patch` / `move` / `copy` / `trash` |
-| expires_at | TEXT (ISO 8601) | NOT NULL | 快照保留过期时间，默认 7 天后可回收（受 backup_retention_days 控制） |
-
-**约束：**
-- before_blob_ref 指向受限对象存储中的旧版本备份，需加密或严格 OS 权限保护。
-- 同一 operation_id 下可有多个 Revision（如 copy 操作涉及源和目标）。
-
----
+一次操作可有多路径元数据（移动源/目的）；复制源未改变，不必生成源修订。可恢复对象是有 before_hash 且可校验的普通文件旧字节；创建时旧文件不存在，删除后 after_hash 可为空，不声称能恢复不存在的版本。历史查询返回安全元数据和 revision_id，不返回物理引用；过期、缺失、损坏或未保存的内容明确不可用，不能按 hash 伪造正文。历史 diff 可对比当前文件与可用旧字节或经授权 Git 基准。单文件恢复校验同工程、规范路径、根 generation、当前权限及旧字节哈希，并通过新 Operation 提交。清理可去除物理内容并标为 EXPIRED/UNAVAILABLE，保留历史元数据；未决 Operation 引用不得清理。
 
 ### 3.6 Audit（审计事件）
 
-**持久化**：是 | **暴露给 MCP 工具**：否（审计数据独立存储，权限隔离；`cat_list_changes` 返回精简版本）
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| event_id | TEXT PK | 随机事件 ID |
+| subject | TEXT 可空 | 已验证主体；认证失败可空，不存伪造声明 |
+| project_id, workspace_id, operation_id | TEXT 可空 | 仅填已核验的真实引用；发现/拒绝可无关联 |
+| action | TEXT NOT NULL | 实际工具或内部授权/恢复/清理动作 |
+| phase | TEXT NOT NULL | access/prepare/final/recovery；一个操作可多条事件，最多一条 final |
+| canonical_relative_path | TEXT 可空 | 经授权规范路径，未知/敏感不存原始字符串 |
+| outcome | TEXT NOT NULL | allowed/denied/succeeded/failed/conflict/in_doubt |
+| bytes | INTEGER >=0 | 操作或读取字节数 |
+| before_version, after_version | TEXT 可空 | 操作前后版本，非文件操作可空 |
+| error_code, request_id, correlation_id | TEXT 可空 | 脱敏错误及关联 |
+| timestamp | TEXT NOT NULL | UTC |
 
-记录所有受控操作的主体、路径、动作、结果和关联信息，实现完整审计追踪。
+审计覆盖读/写、拒绝、查询及恢复；最终写入审计必须与状态和回执同一 SQLite 事务。独立审计逻辑表/受限状态目录实现与工程隔离，可另行安全外送；外送不替代持久记录。审计失败在文件未变更时 fail closed，可能已变更则未决。禁止正文、diff、凭据、主机绝对路径和任意原始工具参数。
 
-| 字段 | 类型 | 约束 | 说明 |
-|------|------|------|------|
-| event_id | TEXT | PK, NOT NULL | 全局唯一审计事件 ID（如 `evt_<urandom>`） |
-| subject | TEXT | NOT NULL | 发起操作的主体标识 |
-| project_id | TEXT | NOT NULL | 操作发生的工程 ID |
-| workspace_id | TEXT | 可空 | 操作所在的工作空间 ID（非写操作可为 NULL） |
-| action | TEXT | NOT NULL | 操作类型枚举：`read_file` / `write_file` / `edit_file` / `create_directory` / `move_path` / `copy_file` / `trash_path` / `restore_file` / `open_workspace` / `close_workspace` / `set_cwd` / `list_directory` / `search_text` / `find_files` / `list_projects` / `stat` / `project_info` / `list_changes` / `get_operation` / `diff_file` 等 |
-| canonical_relative_path | TEXT | 可空 | 规范化的项目相对路径（目录操作、非文件操作可为 NULL） |
-| outcome | TEXT | NOT NULL | 结果枚举：`ok` / `denied` / `conflict` / `error` / `not_found` |
-| bytes | INTEGER | NOT NULL, DEFAULT 0 | 传输或操作的字节数（搜索读取字节、文件写入大小等） |
-| timestamp | TEXT (ISO 8601) | NOT NULL | 事件发生时间戳 |
-| correlation_id | TEXT | 可空 | 关联 ID（如 request_id），用于串联同一请求的多个审计事件 |
+### 3.7 UploadSession（P1 内部持久状态）
 
-**约束：**
-- 审计数据单独存储、权限隔离，与工程文件不在同一目录。
-- 日志默认不存文件正文、diff、token。
-- 审计失败时写操作 fail closed 或进入可恢复未决状态。
+这是 R14/CAT-33 五个分块工具的内部状态，不新增 API 或外部存储服务。
 
----
+| 字段 | 类型及约束 | 语义 |
+|---|---|---|
+| id | TEXT PK | upload_id，随机且不是授权凭据 |
+| subject, project_id, workspace_id | TEXT NOT NULL | 原主体/工程/workspace 复合 FK |
+| project_generation | INTEGER >=1 | begin 时的工程 generation |
+| path | TEXT NOT NULL | begin 固定目标相对路径 |
+| mode | TEXT NOT NULL | create/replace |
+| expected_version | TEXT 可空 | replace 必填，create 表示目标不存在 |
+| total_size | INTEGER >=0 | 预期总字节数 |
+| file_hash | TEXT NOT NULL | 原始总 SHA-256 |
+| staging_ref | TEXT NOT NULL | 工程外受限暂存键 |
+| next_chunk_index, next_offset | INTEGER >=0 | 下一预期序号与偏移 |
+| chunks_json | TEXT NOT NULL | 有界已接受块清单（序号、offset、长度、hash），无正文 |
+| status | TEXT NOT NULL | OPEN/FINALIZING/COMMITTED/ABORTED/EXPIRED/IN_DOUBT |
+| finish_operation_id | TEXT 可空 FK | 唯一正式 finish Operation |
+| expires_at, created_at, updated_at | TEXT NOT NULL | 租期及时间 |
+
+begin、chunk、abort 的请求回执用 Operation 同一幂等作用域记录；仅 finish 变更真实工程。单上传锁下先持久预备清单，再写/fsync 暂存，再原子登记块及回执；重启核对暂存与清单，不能证明则拒绝继续，未决对象不清理。finish 固定 begin 路径，不按新 CWD 解释；重验原 workspace 有效、项目 generation、ACL、版本和总哈希。块和总大小、清单数量、临时空间及租期均有限；下载不持久化内容，续读带版本。
 
 ## 4. 配置模型
 
-配置以 TOML 文件管理，默认路径由管理员指定，环境变量可覆盖敏感项。
+配置以管理员控制的 TOML 为唯一持久配置来源，环境变量仅按受支持字段覆盖；不引入数据库热配置或 AI 修改权限。真实配置、IdP 凭据和状态路径不提交公开仓库。CAT-03 完成模型、实际默认值及交叉校验；下列是在 B §7 基础上的必要细化。
 
 ### 4.1 `[server]` — 服务端
 
@@ -209,7 +201,7 @@ PREPARED ──→ COMMITTED
 |------|------|--------|------|
 | issuer | string | — | OAuth issuer 标识，用于验证 access token 的 iss 声明 |
 | audience | string | `"cat"` | OAuth audience，校验 token aud 声明 |
-| require_auth | boolean | `true` | 是否强制鉴权；本地开发模式可设为 false，公网必须 true |
+| require_auth | boolean | `true` | 是否强制鉴权；仅隔离 loopback 开发可 false，不得经代理公网暴露；公网必须 true |
 
 ### 4.3 `[[projects]]` — 工程注册列表
 
@@ -217,9 +209,9 @@ PREPARED ──→ COMMITTED
 |------|------|------|
 | id | string | 工程标识符，与 Project.id 对应，不依赖目录名 |
 | root | string | 工程真实绝对路径，与 Project.root_path 对应 |
-| access | array of string | 该项目允许的动作上限，如 `["read", "write"]`；最终权限取 ACL 与 access 的交集 |
+| access | array of string | 该项目允许的动作上限，如 `["discover", "read", "write", "workspace"]`；最终权限取 token scope、Grant.scopes、access 三者交集 |
 
-约束：access 值取值范围同 Grant.scopes：`discover`、`read`、`write`、`delete`、`restore`、`audit`。
+约束：access 值取值范围同 Grant.scopes：`discover`、`read`、`write`、`delete`、`restore`、`audit`、`workspace`；独立动作，无等级继承。管理员必须显式授权所有实际所需动作。支持多个 discovery_root，由管理员配置且扫描候选默认未授权；批准后才写入 Project。
 
 ### 4.4 `[limits]` — 限额与阈值
 
@@ -232,8 +224,15 @@ PREPARED ──→ COMMITTED
 | max_search_seconds | integer | `10` | 搜索操作最大耗时（秒），超时明确返回 |
 | max_search_results | integer | `100` | 搜索返回的最大匹配结果数 |
 | workspace_idle_seconds | integer | `7200` | 工作空间空闲超时秒数（2 小时） |
+| workspace_max_seconds | integer | `86400` | 最长租期（24小时），空闲续期不能突破此值 |
 | max_concurrent_per_subject | integer | `4` | 每主体最大并发操作数 |
 | backup_retention_days | integer | `7` | 备份和快照保留天数 |
+| backup_max_bytes | integer | 部署前明确有限正数 | 备份与回收对象总容量；禁止无限 |
+| temp_max_bytes | integer | 部署前明确有限正数 | 临时对象容量，含 P1 上传暂存 |
+| max_request_bytes | integer | 由 CAT-03/28 按客户端实测确定 | JSON/传输体硬上限，与正文限额及 Base64 膨胀协调 |
+| max_search_scan_bytes | integer | 由 CAT-28 实测确定 | 扫描总字节预算 |
+| max_scan_entries | integer | 由 CAT-28 实测确定 | 目录/搜索/目录版本清单预算 |
+| upload_max_bytes / upload_chunk_max_bytes / upload_max_chunks / upload_ttl_seconds | integer | P1 CAT-33 确定有限正数 | 上传、块、清单及租期限制；未确定前不启用上传 |
 
 ### 4.5 `[security]` — 安全策略
 
@@ -242,119 +241,31 @@ PREPARED ──→ COMMITTED
 | allow_shell | boolean | `false` | 是否允许任意 Shell 执行（V1 固定为 false） |
 | follow_symlinks | boolean | `false` | 是否跟随符号链接（V1 固定为 false） |
 | allow_recursive_delete | boolean | `false` | 是否允许递归删除目录（需服务端独立审批） |
-| deny_sensitive_files | boolean | `true` | 是否拒绝敏感文件（.env、私钥、凭据、Git 内部配置等） |
+| deny_sensitive_files | boolean | `true` | V1 固定 true；仅管理员显式批准非敏感例外（如 .env.example），不可关闭内置安全拒绝 |
 
 ---
+
 
 ## 5. 路径模型
 
-Cat 的路径模型基于工程相对路径、逻辑 CWD 和严格的安全校验，定义如下：
+客户端使用 C 的统一 path_base：cwd（默认）或 root；根规范表示 "."。返回路径均工程相对，不暴露实际绝对路径。对绝对路径、UNC、URL、NUL、越根路径、特殊文件/链接、危险硬链接及未授权挂载拒绝；允许目录元数据安全显示 symlink 类型但不跟随。规范化仅是逻辑步骤，不代表文件安全：使用受控根 fd、逐级 O_NOFOLLOW/O_DIRECTORY、实际 inode/挂载及授权检查，操作始终使用安全父目录 fd。不得拼接路径后再直接访问，不能依赖进程级 chdir 或单次 realpath。
 
-### 5.1 路径类型
-
-| 概念 | 说明 |
-|------|------|
-| **绝对路径** | 客户端禁止传入服务器绝对路径。工具内部使用工程根 + 规范化后的相对路径拼接 |
-| **相对路径** | 参数 `path` 默认相对 Workspace.cwd。可用 `path_base=root` 从工程根绝对定位 |
-| **CWD** | 逻辑虚拟当前工作目录，由 Workspace 实体维护。支持 `.`、`..` 和子目录，但不得越出工程根。永不切换系统进程工作目录 |
-| **path_base** | 可选参数，值仅为 `root`（从工程根定位）或省略（从 CWD 定位） |
-
-### 5.2 路径规范化规则
-
-1. 拒绝服务器绝对路径、URL 协议前缀、NUL 字符、Windows 驱动器/UNC 等歧义形式。
-2. 拒绝 `..` 序列逸出工程根。
-3. 所有路径在授权校验前完成规范化（移除冗余分隔符、解析 `.`/`..`）。
-4. 每个 MCP 工具响应返回 `project_id`、`workspace_id`、`cwd`、`cwd_version` 和规范化后的相对路径。
-
-### 5.3 安全约束
-
-| 约束 | 行为 |
-|------|------|
-| 符号链接 | 默认禁止穿越及写入；可显示链接状态，但不返回外部目标 |
-| 特殊文件 | 拒绝特殊设备、FIFO、socket、未获授权子挂载、危险 hardlink |
-| fd-relative | 使用 `dir_fd` 逐级打开父目录，`O_NOFOLLOW` / `O_DIRECTORY` 确保安全路径解析 |
-| 根保护 | 工程根本身不可删除、移动或覆盖 |
-| 路径授权 | 根目录、目录祖先及目的路径均需授权校验 |
-| CWD 版本 | 写调用必须传入 `cwd_version`，CWD 变更后旧版本号写请求返回 CWD_CONFLICT |
-| 敏感文件 | `.env`、私钥、凭据、生产配置、Git 内部配置等按 denylist 策略统一拒绝，所有工具（读/写/搜索/备份）执行相同策略 |
-
----
+相对 mutation 必须传 cwd_version；显式 root 无需 cwd_version；source/destination 同一 base。祖先及目的授权、denylist 优先，目录版本采用 C 定义的受限完整清单；不满足完整子树安全约束时拒绝相关目录变更。OS 隔离不足拒绝公网写，外部 IDE 非协调修改的竞态边界见 D。
 
 ## 6. 错误模型
 
-### 6.1 统一响应格式
+C §5 是统一公开错误契约。成功响应 {ok:true,request_id,workspace_id,data}；失败 {ok:false,request_id,workspace_id,error:{code,message,retryable,details}}，未适用的 workspace_id 为 null，data/error 互斥。request_id 对未传的只读请求由服务生成关联 ID，文件变更必须显式给定稳定 ID。仅返回授权上下文，错误不得泄露实际服务器路径、隐藏文件、主体、凭据或堆栈。
 
-所有 MCP 工具返回结构化 JSON，格式如下：
+| 类别 | 错误码 |
+|---|---|
+| 身份/授权 | UNAUTHENTICATED、FORBIDDEN、WORKSPACE_EXPIRED、APPROVAL_REQUIRED |
+| 参数/路径/状态 | INVALID_ARGUMENT、CWD_CONFLICT、PATH_OUTSIDE_ROOT、UNSAFE_PATH、NOT_FOUND、ALREADY_EXISTS |
+| 版本/编辑 | VERSION_CONFLICT、AMBIGUOUS_MATCH、PATCH_MISMATCH |
+| 资源/能力 | CURSOR_EXPIRED、TOO_LARGE、RATE_LIMITED、TIMEOUT、CAPABILITY_UNAVAILABLE、UNSUPPORTED_ENCODING、HISTORY_UNAVAILABLE、STORAGE_UNAVAILABLE |
+| 幂等及未决 | IDEMPOTENCY_CONFLICT、IN_DOUBT、INTERNAL_ERROR |
 
-```json
-{
-  "ok": true,
-  "request_id": "r_example",
-  "workspace_id": "ws_example",
-  "data": { ... },
-  "error": null
-}
-```
+retryable 处理与 C 一致，明确失败的写入不自动执行同一请求；IN_DOUBT 禁止盲重试。业务错误使用 MCP isError=true；认证及协议错误使用 HTTP/MCP 语义。审计记录按 §3.6 脱敏。
 
-失败时 `ok` 为 `false`，`error` 字段包含结构化错误信息：
+## 7. 持久化与对外投影
 
-```json
-{
-  "ok": false,
-  "request_id": "r_example",
-  "workspace_id": null,
-  "data": null,
-  "error": {
-    "code": "VERSION_CONFLICT",
-    "message": "文件版本不匹配：期望 sha256:abc，实际 sha256:def",
-    "retryable": true,
-    "details": {
-      "expected_version": "sha256:abc",
-      "actual_version": "sha256:def",
-      "path": "src/main.java"
-    }
-  }
-}
-```
-
-### 6.2 错误码表
-
-| 错误码 | 含义 | 可重试 | 客户端处理 |
-|--------|------|--------|-----------|
-| `UNAUTHENTICATED` | 未认证 | 否 | 重新获取 token 后重试 |
-| `FORBIDDEN` | 无权限 | 否 | 申请对应授权 |
-| `WORKSPACE_EXPIRED` | 工作空间已过期 | 是 | 重新 `cat_open_workspace` |
-| `CWD_CONFLICT` | CWD 版本不匹配 | 是 | 调用 `cat_get_workspace` 获取当前版本 |
-| `PATH_OUTSIDE_ROOT` | 路径超出工程根 | 否 | 修正路径参数 |
-| `UNSAFE_PATH` | 不安全路径（symlink/特殊文件） | 否 | 拒绝且审计 |
-| `NOT_FOUND` | 文件或目录不存在 | 否 | 确认路径后重试 |
-| `ALREADY_EXISTS` | 文件或目录已存在 | 否 | 确认目标状态后改用 replace 模式 |
-| `VERSION_CONFLICT` | 文件版本不匹配 | 是 | 重新 `cat_read_file` 获取最新版本后重试 |
-| `AMBIGUOUS_MATCH` | 编辑匹配模糊（多匹配） | 是 | 收窄匹配锚点 |
-| `PATCH_MISMATCH` | 补丁应用失败 | 是 | 重新生成补丁 |
-| `CURSOR_EXPIRED` | 分页游标已过期 | 是 | 从新分页快照重启 |
-| `TOO_LARGE` | 请求超出大小限制 | 是 | 分块重试 |
-| `RATE_LIMITED` | 被限速 | 是（按 retry_after） | 等待 retry_after 时间后重试 |
-| `APPROVAL_REQUIRED` | 需用户审批 | 否 | 等待真实授权流程 |
-| `IDEMPOTENCY_CONFLICT` | 幂等 ID 冲突（不同请求参数） | 否 | 使用新 request_id 重试 |
-| `IN_DOUBT` | 操作状态不确定（崩溃后） | 否 | 查询操作状态，联系管理员恢复 |
-
-### 6.3 错误记录规范
-
-- 所有结果避免泄露主机绝对路径和内部堆栈信息。
-- MCP 工具业务错误使用 `isError=true` 和结构化内容返回。
-- 认证/协议错误使用标准 HTTP 状态码和 MCP 协议语义。
-- 审计失败时写操作 **fail closed** 或进入可恢复未决状态。
-
----
-
-## 附录：持久化与 MCP 暴露矩阵
-
-| 实体 | SQLite 持久化 | MCP 工具直接返回 | MCP 工具间接引用 |
-|------|:------------:|:----------------:|:----------------:|
-| Project | 是 | `cat_list_projects`、`cat_open_workspace` | — |
-| Grant | 是 | — | 内部鉴权，不暴露 |
-| Workspace | 是 | `cat_open_workspace`（返回 id、cwd、cwd_version） | 所有写工具通过 `workspace_id` 引用 |
-| Operation | 是 | `cat_get_operation`（返回状态和回执） | `cat_list_changes`、`cat_diff_file` |
-| Revision | 是 | — | `cat_diff_file`、`cat_restore_file` |
-| Audit | 是 | — | `cat_list_changes`（返回精简摘要） |
+MCP 不暴露原始数据库行。Project 仅授权 ID/摘要；Grant 不直接返回；Workspace 仅授权上下文；Operation 返回查账状态及原安全回执；Revision 返回授权历史 ID 和可用性；Audit 返回精简变更摘要而非原始日志；UploadSession 返回 upload_id、进度、租期和最终回执。所有持久对象与路径均按当前权限重新投影。F 为物理表设计；实施及独立测试按对应 CAT 任务和 G2/G3/G4/G5 门禁，不把本设计当实现结果。

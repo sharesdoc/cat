@@ -1,5 +1,8 @@
 # D-核心业务流程
 
+> 版本：v1.1（设计审查修订；尚未实现）
+> 依据：总体方案 v1.2、A/B、C/E/F、开发实施计划及 CAT-01–40。
+
 ## 总述
 
 Cat 的核心业务场景是：AI MCP 客户端（如 ChatGPT、Claude Code 等）通过公网 HTTPS 远程访问服务器上授权的工程目录，完成"理解工程结构 -> 定位目标代码 -> 精确修改文件"的完整闭环。服务端负责确定性执行文件操作，客户端负责分析、设计和编程决策，两者通过 MCP 工具契约协同工作。
@@ -20,6 +23,7 @@ Cat 的核心业务场景是：AI MCP 客户端（如 ChatGPT、Claude Code 等�
 | 版本 | 日期 | 修订说明 | 修订人 |
 |------|------|----------|--------|
 | v1.0 | 2026-11-26 | 初稿，基于 v1.2 总体需求方案 §8、§9 及 §4、§10 提取 | Cat 文档 |
+| v1.1 | 2026-11-26 | 对齐客户端契约、权限与事务状态机；修正创建、恢复、崩溃和分块流程 | 设计复审 |
 
 ---
 
@@ -30,7 +34,7 @@ Cat 的核心业务场景是：AI MCP 客户端（如 ChatGPT、Claude Code 等�
 | AI MCP 客户端/用户 | ChatGPT、Claude Code、Codex 等调用 Cat MCP 工具的 AI 代理或人类用户 | 分析代码、设计修改、编排任务流、确认审批 |
 | Cat 服务端 | 公网 MCP 服务，负责文件操作、状态维护与一致性保障 | 鉴权、路径安全、文件读写、版本管理、锁与事务、审计 |
 | 文件系统 | 服务器上授权的真实工程目录 | 存储文件内容、提供 fd-relative 安全路径操作能力 |
-| OAuth IdP | 外部身份提供商（如 GitHub OAuth） | 签发和验证 access token，确认主体身份 |
+| OAuth IdP | 经 CAT-05/06 核验支持目标 MCP 授权流程的外部身份提供方 | 签发和验证 access token，确认主体身份 |
 
 ---
 
@@ -40,56 +44,50 @@ Cat 的核心业务场景是：AI MCP 客户端（如 ChatGPT、Claude Code 等�
 
 AI 客户端从未知工程开始，逐步定位到目标代码文件，是后续一切修改的前置步骤。
 
+下图为授权工程的主路径。括号中省略的公共参数仍按 C 校验；P1 工具仅在相应功能交付后可调用。
+
 ```mermaid
 sequenceDiagram
     participant A as AI MCP 客户端
+    participant I as OAuth IdP
     participant C as Cat 服务端
-    participant FS as 文件系统
-    participant IdP as OAuth IdP
-
-    Note over A,IdP: 1. 认证与工具发现
-    A->>+IdP: OAuth 认证流程（PKCE）
-    IdP-->>-A: access token
-    A->>+C: MCP 初始化（携带 token）
-    C->>IdP: 校验 token 签名/签发者/受众/过期
-    IdP-->>C: 有效
-    C-->>-A: 工具列表与能力声明
-
-    Note over A,FS: 2. 工程发现与选择
-    A->>+C: cat_list_projects(query?, cursor?, limit?)
-    C-->>-A: 授权工程列表（ID、显示名、权限摘要）
-
-    A->>+C: cat_open_workspace(project_id, cwd?)
-    Note right of C: 生成不可预测 workspace_id<br/>返回 cwd_version
-    C-->>-A: workspace_id, cwd_version
-
-    Note over A,FS: 3. 顶层工程概览
-    A->>+C: cat_project_info(workspace_id)
-    C-->>-A: 名称/语言估计/Git 概况
-
-    A->>+C: cat_list_directory(depth=1)
-    C-->>-A: 根目录条目
-
-    Note over A,FS: 4. 逐层深入——逼近目标
-    A->>+C: cat_list_directory(path="src/", depth=?)
-
-    A->>+C: cat_find_files(glob="**/*Service*.java")
-
-    A->>+C: cat_search_text(query="class UserService", mode="literal")
-
-    Note over A,FS: 5. 读取源码
-    A->>+C: cat_stat(path="src/main/java/UserService.java")
-    C-->>-A: 类型/大小/版本/编码
-
-    A->>+C: cat_read_file(path=..., start_line=?, end_line=?, max_bytes=?)
-    Note right of C: 分段读取，保留版本号<br/>行号 1-based 闭区间<br/>支持 UTF-8/BOM/LF/CRLF
-    C-->>-A: 内容 + 版本 + 编码/换行
-
-    Note over A,FS: 6. 切换到目标工作目录
-    A->>+C: cat_set_cwd(workspace_id, path=..., expected_cwd_version)
-    Note right of C: 逻辑 CWD，不切换进程目录<br/>不能越出工程根
-    C-->>-A: 新 cwd + cwd_version
+    participant F as 安全文件层
+    A->>I: OAuth 授权及 PKCE（适用时）
+    I-->>A: access token
+    A->>C: initialize（认证请求）
+    C->>C: 验证令牌并协商协议版本
+    C-->>A: 初始化响应
+    A->>C: initialized 通知及 tools/list
+    C-->>A: 实际可用工具及 Schema
+    A->>C: cat_list_projects
+    C-->>A: 授权工程列表
+    A->>C: cat_open_workspace(project_id)
+    C-->>A: workspace_id / cwd_version
+    opt P1 工程概要已启用
+        A->>C: cat_project_info(workspace_id)
+        C-->>A: 授权范围内概要
+    end
+    A->>C: cat_list_directory(workspace_id, path_base=root, depth=1)
+    C->>F: 安全遍历及分页
+    F-->>C: 有界目录元数据
+    C-->>A: 条目及游标
+    A->>C: cat_find_files(workspace_id, glob)
+    C-->>A: 规范相对路径
+    A->>C: cat_search_text(workspace_id, query, mode=literal)
+    C-->>A: 匹配路径 / 行号 / 版本
+    A->>C: cat_stat(workspace_id, path, path_base=root)
+    C-->>A: 文件属性及版本
+    A->>C: cat_read_file(workspace_id, path, path_base=root)
+    C-->>A: 文本、版本 V1、续读位置
+    loop 存在后续分段
+        A->>C: cat_read_file(workspace_id, path, expected_version=V1, continuation)
+        C-->>A: 同版本分段或 VERSION_CONFLICT
+    end
+    A->>C: cat_set_cwd(workspace_id, path, expected_cwd_version)
+    C-->>A: 新 cwd / cwd_version
 ```
+
+continuation 表示 C 文档中的 start_line 或 byte_offset；不是新增参数。返回的工程相对路径再次调用时显式 path_base=root。未启用 P1 时直接使用目录、查找及读取。
 
 ### 关键决策点
 
@@ -104,7 +102,7 @@ sequenceDiagram
 
 - workspace 绑定登录主体，不同 AI 即使同一账号也独立 workspace
 - 每次请求重验授权和工程 generation
-- cwd 变更后旧请求被拒绝，防止混淆工作目录
+- CWD 变更后旧相对变更请求被拒绝；显式 root 定位不依赖 CWD
 - 读取时 expected_version 可传入，中途内容改变则返回 VERSION_CONFLICT
 
 ---
@@ -115,80 +113,56 @@ sequenceDiagram
 
 AI 客户端对一个已知版本的文件执行精确编辑或覆盖写入，是 Cat 最核心的写操作路径。
 
+读取、预览和正式提交必须绑定同一原始版本；所有正式变更使用 C 的幂等键和公共授权上下文。预览不是提交或审批。
+
 ```mermaid
 sequenceDiagram
     participant A as AI MCP 客户端
-    participant C as Cat 服务端
-    participant FS as 文件系统
-    participant SQL as SQLite 状态库
-
-    Note over A,SQL: 主路径：正常修改
-    A->>+C: cat_read_file(path, expected_version?)
-    C->>FS: 授权分段读取
-    FS-->>C: bytes
-    C-->>-A: text + 版本 V1
-
-    A->>+C: cat_edit_file(dry_run=true, expected_version=V1, edits)
-    Note right of C: 内存中校验所有匹配<br/>拒绝重叠范围、模糊替换<br/>不修改工程
-    C-->>-A: diff 预览 + 匹配摘要
-
-    A->>+C: cat_edit_file(request_id, expected_version=V1, edits)
-    Note right of C: 进入写入一致性协议（详见 §6）
-
-    C->>SQL: 工程 + 路径级锁定
-    SQL-->>C: 锁获取
-
-    alt 版本未变化
-        C->>FS: 保存旧文件副本到备份存储
-        C->>SQL: 记录 PREPARED
-        C->>FS: 创建临时文件 → 写入 → fsync → 原子 rename
-        C->>FS: fsync 父目录
-        C->>SQL: 记录 COMMITTED + 新版本 V2
-        C-->>-A: 回执 + request_id + 版本 V2
-
-        Note over A,C: 确认回读
-        A->>+C: cat_read_file(expected_version=V2)
-        C-->>-A: 确认内容一致
-    else 外部已修改
-        C-->>-A: VERSION_CONFLICT
-        Note over A: 重新读取当前版本<br/>重新设计编辑策略<br/>不自动覆盖
+    participant C as Cat 工具层
+    participant O as 统一变更协调器
+    participant F as 安全文件层
+    A->>C: cat_read_file(workspace_id, path)
+    C-->>A: 原始文本 / V1
+    A->>C: cat_edit_file(dry_run=true, expected_version=V1, edits)
+    C->>C: 授权、原版本精确定位、重叠检查
+    C-->>A: 有界 diff / 原版本 / 预览摘要
+    Note over A,C: 按客户端和服务端策略完成必要审批
+    A->>C: cat_edit_file(request_id, expected_version=V1, edits)
+    C->>O: 校验身份及规范请求，查询或预留幂等记录
+    O->>O: 获取路径锁并重验 ACL/CWD/路径/版本
+    alt 旧版本已变化
+        O-->>C: 确定失败 VERSION_CONFLICT
+        C-->>A: 重新读取并生成新请求
+    else 条件满足
+        O->>F: 按第6章执行持久原子提交
+        F-->>O: 真实文件状态及持久化证据
+        O->>O: 同一数据库事务记录结果、快照和审计
+        O-->>C: COMMITTED / 原回执 / V2
+        C-->>A: operation_id / V2
+        A->>C: cat_read_file(expected_version=V2)
+        C-->>A: 同版本回读或后续变更冲突
     end
-
-    Note over A,SQL: 处理路径：版本冲突
-    A->>+C: cat_read_file(path)  ← 重新获取最新版本
-    C-->>-A: text + 版本 V2'
-    A->>C: cat_edit_file(dry_run, expected_version=V2', ...)
-    A->>C: cat_edit_file(request_id, expected_version=V2', ...)
-    Note right of C: 以新版本为基线重试
-    C-->>-A: 成功回执或再次冲突
 ```
 
 ### 网络中断与幂等重试
 
+断线后先查询原工作空间与请求 ID，而非重新生成 ID。对未确认提交的请求，必须区分未受理、处理中与未决。
+
 ```mermaid
-sequenceDiagram
-    participant A as AI MCP 客户端
-    participant C as Cat 服务端
-
-    Note over A,C: 场景：提交 edit_file 后网络中断
-    A->>+C: cat_edit_file(request_id="r_abc", ...)
-    Note over A: 网络断开等待超时
-
-    Note over A: AI 恢复连接后：
-    A->>+C: cat_get_operation(request_id="r_abc")
-    alt request_id 已执行并提交
-        C-->>-A: 已完成 + 回执 + 版本 V2
-    else request_id 在执行中（PREPARED）
-        C-->>-A: 进行中 + 状态
-        Note over A: 等待或稍后重试
-    else request_id 不存在
-        C-->>-A: 未知
-        Note over A: 可安全重试（使用同一 request_id）
-    end
-
-    Note over A,C: 关键规则
-    Note left of A: 同 request_id + 同参数 = 原回执<br/>同 request_id + 不同参数 = IDEMPOTENCY_CONFLICT<br/>不同 request_id + 同请求 = 二次写入（危险）
+flowchart TD
+    A["断线后以原 workspace_id 和 request_id 查账"] --> B{"当前授权及作用域有效?"}
+    B -->|否| X["拒绝; 不泄露记录"]
+    B -->|是| S{"查询状态"}
+    S -->|COMMITTED| R["采用持久原回执"]
+    S -->|IN_PROGRESS| W["继续查询; 不启动第二次操作"]
+    S -->|FAILED| F["已终结; 重新评估后才可用新 ID"]
+    S -->|IN_DOUBT| I["管理员核验; 禁止重放"]
+    S -->|UNKNOWN| U{"服务确认未受理且处于安全窗口?"}
+    U -->|是| T["同原作用域、ID、参数重放"]
+    U -->|否| I
 ```
+
+同 ID 同参数仅查回执；不同参数返回 IDEMPOTENCY_CONFLICT。已受理请求保存首次规范路径，重放不得因 CWD 变化转向别处。原 workspace 过期/关闭时仅允许 C 定义的授权查账例外；不得借查账恢复写权限。
 
 ### 关键决策点
 
@@ -218,87 +192,74 @@ sequenceDiagram
 
 ### 5.1 创建文件/目录
 
+文件创建与目录创建是两个独立工具。父目录不存在时先明确调用 create_directory，不将 parents 参数传给 write_file。
+
 ```mermaid
 flowchart TD
-    Start([AI 调用创建工具]) --> Stat{前置 stat 确认}
-    Stat -->|文件已存在 + mode=create| Error1[拒绝: ALREADY_EXISTS]
-    Stat -->|文件不存在 + mode=create| ParentDir{父目录是否存在}
-    ParentDir -->|父目录已存在| Write[创建文件<br/>= 原子写入（no-replace）]
-    ParentDir -->|父目录不存在 + parents=false| Error2[拒绝: 父目录不存在]
-    ParentDir -->|父目录不存在 + parents=true| Mkdir[创建父目录链] --> Write
-    Write --> Return[返回创建回执]
-
-    Start2([AI 调用 cat_create_directory]) --> DirStat{已有同名文件?}
-    DirStat -->|是| Error3[拒绝: ALREADY_EXISTS（不是目录）]
-    DirStat -->|不存在或已目录| DoMkdir[mkdir / mkdir -p]
-    DoMkdir --> Return2[返回创建回执]
+    A["cat_write_file(mode=create)"] --> B{"父目录存在且安全?"}
+    B -->|否| X["拒绝; 先显式创建目录"]
+    B -->|是| C{"目标不存在?"}
+    C -->|否| Y["ALREADY_EXISTS"]
+    C -->|是| N["统一协调器执行原子 no-replace"]
+    D["cat_create_directory"] --> E{"目标不存在且父目录已存在或 parents=true?"}
+    E -->|否| Z["拒绝; 不覆盖"]
+    E -->|是| P["预检路径链; 逐级安全 mkdir"]
+    P --> L["记录已创建目录; 部分失败如实报告"]
+    N --> R["持久结果与审计"]
+    L --> R
 ```
 
 ### 5.2 移动/复制
 
 ```mermaid
 flowchart TD
-    Start([AI 调用 move/copy]) --> Auth{源 + 目的都授权?}
-    Auth -->|任一未授权| Reject[拒绝: FORBIDDEN]
-    Auth -->|已授权| Cross{跨工程?}
-    Cross -->|是| Reject2[拒绝: V1 禁止跨工程移动]
-    Cross -->|同工程| DestExists{目的已存在?}
-    DestExists -->|是| Reject3[拒绝: 默认不覆盖]
-    DestExists -->|不存在| Execute[执行 move/copy]
-    Execute --> Return[返回回执 + 新版本]
+    A["move / copy"] --> B{"同工程、源目的及祖先授权?"}
+    B -->|否| X["拒绝"]
+    B -->|是| C["稳定顺序锁源/目的"]
+    C --> D{"安全类型、源版本、目的不存在?"}
+    D -->|否| X
+    D -->|是| E{"move 或 copy?"}
+    E -->|move| M["同文件系统 no-replace; 子树全授权; 非自身子树"]
+    E -->|copy| N["仅普通文件; 安全 fd 流式复制"]
+    M --> R["持久结果、审计、必要的 CWD 失效"]
+    N --> R
 ```
 
 ### 5.3 删除（回收区模式）
 
 ```mermaid
 flowchart TD
-    Start([AI 调用 cat_trash_path]) --> Check{路径是工程根?}
-    Check -->|是| Reject[永久拒绝: 不可删除工程根]
-    Check -->|否| Scope{递归删除?}
-    Scope -->|recursive=true| Gate(需服务端独立审批<br/>提供清单摘要<br/>严格大小上限)
-    Scope -->|recursive=false| Trash[移至工程专属回收区]
-    Gate -->|审批通过| Trash
-    Gate -->|审批不通过| Reject2[拒绝]
-    Trash --> Audit[审计记录]
-    Audit --> Return[返回回执]
+    A["cat_trash_path"] --> B{"工程根 / 无授权 / 版本冲突?"}
+    B -->|是| X["拒绝"]
+    B -->|否| C{"非空目录?"}
+    C -->|否| T["准备隔离回收对象及清单"]
+    C -->|是| D{"recursive=true 且已启用、审批、完整授权及限额?"}
+    D -->|否| X
+    D -->|是| T
+    T --> E{"同文件系统可安全原子移动?"}
+    E -->|否| X
+    E -->|是| F["持久 PREPARED; 原子移入回收区; fsync"]
+    F --> R["结果/修订记录/审计"]
 ```
 
-**回收区规则**：
-- 删除默认移至工程专属回收区（外部目录，不经 MCP 暴露）
-- 非立即物理删除
-- 递归目录删除需服务端独立审批、清单摘要和严格大小上限
-- 删除路径本身不可删除
-- 回收区清理由管理员计划执行
+回收区在工程外，禁止 MCP 直接访问。工程根不可删除、移动或覆盖；递归目录删除默认禁用。管理员按保留期和配额清理；P1 的 MCP 恢复只支持单文件，目录回收材料由管理员处理。
 
-### 5.4 恢复
+### 5.4 单文件恢复（P1）
 
 ```mermaid
 flowchart TD
-    Start([AI 调用 cat_restore_file]) --> Current{目标路径当前状态}
-    Current -->|存在 + 版本与恢复基线不一致| Reject[拒绝: 不覆盖后续改动]
-    Current -->|存在 + 版本匹配| Restore[从回收区/备份恢复]
-    Current -->|已不存在| Restore
-    Restore --> Return[返回回执 + 新版本]
+    A["cat_restore_file"] --> B{"revision 同工程同路径、当前授权、有效且哈希匹配?"}
+    B -->|否| X["拒绝; 不猜测历史"]
+    B -->|是| C{"当前存在状态和 expected_version 一致?"}
+    C -->|否| Y["VERSION_CONFLICT"]
+    C -->|是| D{"目标原本不存在?"}
+    D -->|是| N["仅 expected_version=absent; 原子 no-replace"]
+    D -->|否| M["按当前哈希条件替换"]
+    N --> R["新操作 / 新版本 / 审计; 保留历史"]
+    M --> R
 ```
 
-### 关键决策点
-
-| 决策点 | 条件 | 结果 |
-|--------|------|------|
-| 创建前确认 | stat 确认文件不存在 | 已存在 + create → ALREADY_EXISTS |
-| 父目录检查 | 创建时检查父目录存在 | 不存在 + 无 parents → 拒绝 |
-| 移动/复制是否覆盖 | 目标已存在 | 默认拒绝，不提供 force 覆盖 |
-| 跨工程移动 | V1 限制 | 直接拒绝 |
-| 路径是否为工程根 | 路径等于工程根 | 永远不可删除、移动或覆盖 |
-| 恢复版本冲突 | 当前已有后续修改 | 拒绝恢复，防止覆盖 |
-| 递归删除安全门 | recursive=true | 需独立审批 + 清单 + 上限 |
-
-### 数据一致性保障
-
-- create 使用 no-replace 语义的原子写入
-- 删除不立即物理删除，可恢复
-- 恢复操作检查当前版本，不覆盖后续变更
-- 所有操作走完整权限校验链
+所有路径操作都使用第6章协调器；move/trash 的目录版本与完整子树清单遵循 C。不同操作的预期前后状态必须分别记录，不把删除、目录创建、移动或复制简化成单文件覆盖。复制不改变源；移动/trash 必须对源与目的（包括内部回收对象）状态同时验证。多级 mkdir 不能保证跨目录事务，明确记录实际新增路径与部分失败。
 
 ---
 
@@ -310,77 +271,82 @@ Cat 的写入一致性协议确保单文件写入在并发、崩溃、网络中�
 
 ### 6.1 正常写入事务
 
+统一状态机与 E/F 一致：RESERVED → PREPARED → COMMITTED / FAILED / IN_DOUBT。FAILED 仅表示确认终止（包括明确记录的 mkdir 部分效果）；可能已改变目标且无法确认的情况不得当作 FAILED。锁由单进程协调器管理，不是 SQLite 路径锁。SQLite 短事务不跨文件 I/O；同步模式 FULL。所有正式 mutation 共用此协议。
+
 ```mermaid
 flowchart TD
-    Start([写入请求到达]) --> Lock[1. 获取锁]
-    Lock -->|锁键: project_id + 规范路径<br/>移动: 锁定源+目的<br/>目录: 层级锁/工程锁| AuthCheck[2. 校验权限]
-    AuthCheck --> PathCheck[3. 校验路径安全]
-    PathCheck --> TypeCheck[4. 校验文件类型]
-    TypeCheck --> VersionCheck[5. 校验 expected_version]
-    VersionCheck -->|匹配| SaveOld[6. 保存旧字节到受限对象存储]
-    SaveOld --> Step7[7. SQLite 记录 PREPARED]
-    Step7 --> TempWrite[8. 同目录创建独占临时文件]
-    TempWrite --> WriteContent[9. 写入内容]
-    WriteContent --> Permission[10. 保留文件许可属性]
-    Permission --> Fsync1[11. fsync 临时文件]
-    Fsync1 --> AtomicRename[12. 原子 rename<br/>新建时使用 no-replace 语义]
-    AtomicRename --> FsyncDir[13. fsync 父目录]
-    FsyncDir --> Step14[14. SQLite 记录 COMMITTED + 新版本]
-    Step14 --> Audit[15. 审计记录]
-    Audit --> Cleanup[16. 清理临时文件]
-    Cleanup --> Return[返回成功回执]
-
-    VersionCheck -->|不匹配| Conflict[VERSION_CONFLICT]
-    Conflict --> CleanupErr[清理临时文件<br/>不宣称已写入]
-    CleanupErr --> ReturnErr[返回冲突错误]
-
-    Step7 -->|任意步骤崩溃| CrashRecovery[见 6.2 崩溃恢复]
-
-    AtomicRename -->|重命名失败| FailCleanup[清理临时文件<br/>不宣称已写入]
-    FailCleanup --> ReturnFail[返回写入失败]
+    A["鉴权、校验 Schema、规范请求摘要"] --> B{"幂等键已存在?"}
+    B -->|是| R["重新鉴权后返回原结果/状态或 IDEMPOTENCY_CONFLICT"]
+    B -->|否| C["短事务持久预留 RESERVED"]
+    C --> D["稳定顺序路径锁; 重验授权、CWD、根身份、类型、版本、配额"]
+    D --> E{"条件、审批及审计预留通过?"}
+    E -->|否| F["确定失败; 记录 FAILED/审计"]
+    E -->|是| G["构造目标字节或完整操作清单; 备份并 fsync"]
+    G --> H["持久 PREPARED: 前后状态、路径身份、备份/暂存引用、预期结果"]
+    H --> I["重新核验; 执行受控文件变更"]
+    I --> J["fsync 受影响文件和全部父目录; 校验实际状态"]
+    J --> K{"结果可证明且最终数据库事务成功?"}
+    K -->|是| L["同一短事务: COMMITTED + revision + audit + 安全回执"]
+    K -->|否| M["保留 journal/备份; IN_DOUBT 或 PREPARED 待恢复; 冻结范围"]
+    L --> N["释放锁并返回成功"]
+    F --> Q["释放锁并返回明确失败"]
+    M --> Z["返回 IN_DOUBT 或断线; 禁止重放"]
 ```
+
+旧内容备份、暂存对象及其目录需先可靠持久化；PREPARED 必须在第一次可能改变工程目标的操作前持久化完整可恢复清单（包括预期 after 版本，不能等 rename 后才计算）。普通文本/二进制写使用同目录独占临时文件，保留必要属性、fsync、原子 rename/no-replace，再 fsync 父目录。移动跨父目录时同步两个父目录；软删除回收区必须满足同文件系统及持久清单要求。无需生成文件的操作按实际类型执行。若 rename 前失败且确认没有目标变更，才能确定 FAILED；rename 后 fsync 或 DB 提交失败属于可能变更，必须保持未决并阻止进一步写。清理失败不得把已提交结果改写成失败。
 
 ### 6.2 崩溃恢复
 
+启动前恢复扫描覆盖 RESERVED、PREPARED 和 IN_DOUBT；禁止在恢复检查完成前开放受影响范围。依据持久 journal 中工程 generation、根身份、源/目的、before/after 清单、对象身份、预期存在性和备份/暂存证据判断，而非仅看目标 hash。
+
 ```mermaid
 flowchart TD
-    Start([服务重启]) --> Scan[扫描 SQLite 中所有 PREPARED 记录]
-    Scan --> Eval{根据 before_hash + after_hash + 目标路径状态判断}
-    Eval -->|文件内容 hash = after_hash| Committed[已提交<br/>→ 更新记录为 COMMITTED]
-    Eval -->|文件内容 hash = before_hash| Uncommitted[未提交<br/>→ 清理备份和临时文件<br/>→ 标记 ABORTED]
-    Eval -->|无法确定<br/>（hash 均不匹配/缓存文件丢失等）| InDoubt[IN_DOUBT<br/>→ 冻结该路径<br/>→ 等待管理员介入]
-    Committed --> Done[恢复完成]
-    Uncommitted --> Done
-    InDoubt --> Alarm[管理员介入，不可盲重试]
+    A["启动; 读取 RESERVED/PREPARED/IN_DOUBT"] --> B["锁定涉及路径; 校验根身份及清单"]
+    B --> C{"可证明仅 RESERVED 且未改目标?"}
+    C -->|是| F["FAILED: 终结原请求; 清理已证实孤立暂存"]
+    C -->|否| D{"完整前后状态和持久证据能唯一判定?"}
+    D -->|已应用| E["重验并 fsync; 原子写入最终结果/修订/审计"]
+    D -->|未应用| G["FAILED: 保留必要证据; 安全清理"]
+    D -->|明确部分 mkdir| P["记录已新增目录及部分失败; 不误删既有目录"]
+    D -->|无法确定| H["IN_DOUBT; 冻结全部关联路径和层级冲突范围"]
+    E --> I["COMMITTED"]
+    H --> J["管理员核验; 仅按证据决议"]
 ```
+
+before/after 相同的无实质变化、路径被重建、外部修改、清单不全或审计未能落盘时不能以 hash 相等自动宣称成功。已知无变化的操作可在变更前直接持久终结为 COMMITTED（no-op 回执），不做不必要的 rename。目录操作按身份和完整清单验证，不能安全判定则冻结。管理员决议也必须留下审计与结果，不能删除未决记录或盲目覆盖。
 
 ### 6.3 并发边界说明
 
 | 情形 | Cat 保障 | 边界/风险 |
-|------|----------|----------|
-| 多个 Cat 客户端并发写同一文件 | Cat 内锁 + 版本校验确保只有一方成功 | 无 |
-| 操作系统本地进程（IDE 等）并发编辑 | 无约束 | 写入前版本核验能检测部分冲突，但存在极窄 TOCTOU 窗口 |
-| POSIX rename + compare-and-swap | 无通用原子 CAS | 外部编辑者需要统一协调协议 |
-| 共享 live workspace 模式 | 替换前核验、写后检查、保留备份 | 不能承诺绝对无冲突 |
+|---|---|---|
+| 多个 Cat 客户端同版本写入 | 共享锁、版本及条件检查；实际不同内容变更最多一方成功 | 相同内容 no-op 可成功，不表示第二次实际写入 |
+| 本地 IDE 或外部进程 | 写前再核验、写后校验及备份 | 非协作进程不受 Cat 锁约束，存在 TOCTOU |
+| 严格生产模式 | 专用受控工程/隔离工作树或统一写协调 | 无法满足 OS 边界时拒绝公网写 |
+| 共享 live workspace | 明确告知风险并由维护者协调 | 不承诺绝对无丢失或 POSIX 通用 CAS |
 
-### 6.4 备份管理
+### 6.4 备份、清理与幂等保留
 
-| 属性 | 值 |
-|------|-----|
-| 备份路径 | 工程外独立存储 |
-| 备份保留周期 | 7 天（建议默认值） |
-| 备份配额 | 按数据策略调整 |
-| 存储限制 | 默认不限但可配置配额；超量返回错误及重试建议 |
+备份对象位于工程外，严格 OS 权限或加密；默认保留7天，配置有限正数配额，不允许默认无限。保留期不能直接删除未决事务、活动上传或仍被引用的对象。清理按状态、引用、期限和配额锁定执行，保留历史元数据并标记快照不可用。幂等回执与备份保留分开；在 workspace 仍可提交或存在未决操作时不得移除请求键。过期窗口外不允许从 UNKNOWN 推断可以重放；优先保留最小请求墓碑，防止重新执行。
 
-### 关键决策点
+### 6.5 分块传输（P1，CAT-33）
 
-| 决策点 | 条件 | 结果 |
-|--------|------|------|
-| 锁键范围 | 单文件 = project_id + 路径；移动 = 源+目的；目录操作 = 层级锁 | 稳定顺序避免死锁 |
-| PREPARED 后崩溃 | 重启后扫描 PREPARED | 判断已提交/未提交/IN_DOUBT |
-| IN_DOUBT 处理 | hash 均不匹配 | 路径冻结，管理员介入 |
-| 临时文件失败 | 任意步骤失败 | 清理临时文件，不宣称写入 |
-| 外部编辑 | 本地进程不遵守 Cat 锁 | TOCTOU 窗口，无法严格保证 |
+```mermaid
+flowchart TD
+    A["begin_upload: 授权、目标条件、总大小/哈希、配额"] --> B["创建绑定主体/workspace/目标的暂存会话"]
+    B --> C["upload_chunk: 核对序号、偏移、块哈希"]
+    C --> D{"重复块或下一合法块?"}
+    D -->|否| X["拒绝; 目标不变"]
+    D -->|是| E["确认暂存持久化及已接受块记录"]
+    E --> F{"全部字节接收?"}
+    F -->|否| C
+    F -->|是| G["finish_upload: 校验总哈希、当前授权、旧版本"]
+    G --> H["统一文件变更事务; 仅此处修改目标"]
+    H --> R["持久回执 / 新版本"]
+    B --> I["abort/过期: 仅清理已确定未提交暂存"]
+    E --> I
+```
+
+每次操作重验会话绑定、租期和配额；重复块必须相同，断线或重启按持久块清单与暂存内容恢复，不确定时拒绝继续/保留未决提交。finish 绑定唯一正式请求 ID；不得把最后一个 upload_chunk 当作自动提交。下载 read_chunk 以原始版本固定字节范围和校验，版本变化必须重新开始。
 
 ---
 
@@ -392,21 +358,22 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start([请求到达]) --> L1{一级: 主体校验}
-    L1 -->|token 有效 + 签名/签发者/受众/scope 校验通过| L2
-    L1 -->|无效/过期/被撤销| Reject1[拒绝: UNAUTHENTICATED]
-
-    L2{二级: 工程校验} -->|主体在该工程有授权 Grant| L3
-    L2 -->|无对应 Grant| Reject2[拒绝: FORBIDDEN]
-
-    L3{三级: 路径校验} -->|路径在 allowed_prefixes 内<br/>+ 安全路径检查|x26a0; 需同时满足
-    L3 -->|路径越权或拒绝列表命中| Reject3[拒绝: FORBIDDEN / UNSAFE_PATH]
-
-    L4{四级: 动作校验} -->|discover/read/write/delete/restore/audit<br/>动作权限匹配| Allow[允许执行]
-    L4 -->|动作不被 Grant scopes 覆盖| Reject4[拒绝: FORBIDDEN]
-
-    Note over Start,Allow: 敏感文件 denylist 额外过滤<br/>.env/私钥/凭据/生产配置/Git 内部配置等<br/>搜索/目录/读/写/备份统一执行
+    A["请求到达"] --> B{"有效身份、token issuer/audience/expiry/scope?"}
+    B -->|否| X["UNAUTHENTICATED"]
+    B -->|是| C{"是否工程级工具?"}
+    C -->|否| G["仅能力或授权工程发现; 不返回未授权元数据"]
+    C -->|是| D{"主体、project、workspace、generation、租期及 Grant 有效?"}
+    D -->|否| Y["FORBIDDEN 或 WORKSPACE_EXPIRED"]
+    D -->|是| E{"scope 与 ACL 与 access 交集包含所需独立动作?"}
+    E -->|否| Y
+    E -->|是| F{"所有规范路径、祖先、源目的及 denylist 合法?"}
+    F -->|否| Z["FORBIDDEN / UNSAFE_PATH / PATH_OUTSIDE_ROOT"]
+    F -->|是| H{"配额及必要审批通过?"}
+    H -->|否| W["RATE_LIMITED / APPROVAL_REQUIRED"]
+    H -->|是| I["允许执行; 写入持锁再次验证"]
 ```
+
+open_workspace 尚无 workspace；由有效主体和项目授权建立。get_operation 的历史只读例外按 C，不得重开权限。拒绝事件也记录脱敏审计；访问前必须完成路径策略，允许文件中命中秘密才拦截或脱敏。
 
 ### 权限分离粒度
 
@@ -417,12 +384,14 @@ flowchart TD
 | write | cat_write_file, cat_edit_file, cat_apply_patch, cat_create_directory, cat_move_path, cat_copy_file |
 | delete | cat_trash_path |
 | restore | cat_restore_file |
-| audit | cat_list_changes, cat_diff_file |
+| audit | cat_list_changes |
+| read（含历史路径授权） | cat_diff_file、cat_get_operation、cat_git_status、cat_git_diff、cat_read_chunk |
+| workspace | cat_set_cwd、cat_close_workspace |
 
 ### 关键规则
 
 - 默认 deny，未显式授权即为拒绝
-- OAuth scopes 与 ACL 取交集，两者都必须通过
+- OAuth scopes、当前 ACL、项目 access 上限取交集，动作独立不继承；copy 需源 read 与目的 write，move 需源目的 write，restore 需 restore 及对应历史路径授权
 - 会话不能替代每次鉴权
 - AI 不得扩大授权、修改 Cat 配置或自身权限
 - 敏感文件 denylist 在所有工具中统一执行
@@ -446,12 +415,14 @@ sequenceDiagram
     participant IdP as OAuth IdP
 
     Note over User,Cat: 前置条件：公网 DNS + TLS 证书 + OAuth 配置
-    User->>ChatGPT: Plugins → 添加自定义 MCP
+    User->>ChatGPT: 按当前账户支持的自定义 MCP 设置添加
     ChatGPT->>Cat: 输入 endpoint URL: https://cat.example.com/mcp
     ChatGPT->>IdP: OAuth 授权流程
     IdP-->>ChatGPT: access token
     ChatGPT->>Cat: MCP 初始化
-    Cat-->>ChatGPT: 工具列表
+    Cat-->>ChatGPT: 初始化响应
+    ChatGPT->>Cat: initialized 通知及 tools/list
+    Cat-->>ChatGPT: 实际启用工具列表
     User->>ChatGPT: 检查确认工具
 
     Note over User,Cat: 验证测试（按顺序）
@@ -475,7 +446,9 @@ sequenceDiagram
 
     Dev->>Client: 配置远程 MCP endpoint + 授权令牌
     Client->>Cat: MCP 初始化
-    Cat-->>Client: 工具列表
+    Cat-->>Client: 初始化响应
+    Client->>Cat: initialized 通知及 tools/list
+    Cat-->>Client: 实际启用工具列表
     Dev->>Client: 调用 Cat 工具（工具执行审批显式控制）
     Note over Dev,Client: 适用于：OpenAI Responses API<br/>Codex/Claude Code 等支持完整 MCP 的客户端
 ```
@@ -494,9 +467,9 @@ sequenceDiagram
 
 | 决策点 | 条件 | 结果 |
 |--------|------|------|
-| 账户是否支持自定义写 | ChatGPT Plus vs Business/Enterprise/Edu/Pro | Pro 只读，Business+ 完整读写 |
+| 账户是否支持自定义写 | ChatGPT Plus vs Business/Enterprise/Edu/Pro | 以目标账户当时权限及 CAT-06 实测为准，不承诺套餐能力 |
 | B 路线账户场景 | 当前网页对话不支持自定义写入 | 改用 API 或其他客户端 |
-| 写工具审批 | 客户端/服务端共同控制 | 写操作需显式确认 |
+| 写工具审批 | 客户端/服务端共同控制 | 按客户端及服务端真实策略完成必要审批；审批拒绝不改变工程 |
 | 工具注解伪装 | readOnlyHint/destructiveHint | 按真实语义配置，不规避审批 |
 
 ---
@@ -521,9 +494,9 @@ flowchart LR
 ```
 
 - **认证授权**是所有业务的前置依赖
-- **工程理解**是文件修改和创建的前置依赖（必须先定位目标文件及其版本）
+- **工程理解**通常先于修改；已有可信路径时可直接调用，但服务端始终重验路径、版本或不存在条件
 - **单文件修改**和 **创建/移动/删除/恢复** 共享同一套写入一致性协议
-- **审计记录**是所有写操作的最终落点
+- **审计记录**覆盖所有调用及拒绝事件；写入成功前须与最终操作回执一致持久化
 - 跨文件修改不声明多文件原子事务，由 AI 客户端逐文件编排
 
 ---
