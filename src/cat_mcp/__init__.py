@@ -6,3 +6,9 @@ remote server through standard MCP tool calls.
 """
 
 __version__ = "1.0.0"
+
+from cat_mcp.state import StateManager
+
+__all__ = [
+    "StateManager",
+]
