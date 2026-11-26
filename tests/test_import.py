@@ -4,7 +4,6 @@ These tests verify that the package can be imported correctly and that
 all public modules are accessible.
 """
 
-import pytest
 
 
 def test_package_import() -> None:
