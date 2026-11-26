@@ -30,7 +30,7 @@ import os
 import stat as stat_module
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import IO, Any
+from typing import Any
 
 from cat_mcp.errors import CatError, ErrorCode
 
@@ -40,8 +40,10 @@ logger = logging.getLogger(__name__)
 # 路径安全常量
 # ---------------------------------------------------------------------------
 
-# macOS 缺少 O_PATH，使用 O_RDONLY|O_NOFOLLOW|O_CLOEXEC 代替
-_O_DIR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+# macOS 缺少 O_PATH，使用 O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC 代替
+# O_NONBLOCK 防止 FIFO 阻塞（攻击者用 mkfifo 替换目录项时 os.open 会
+# 永久挂起）。检测到 ENXIO（FIFO 无写端）或 EAGAIN 时转为 CatError。
+_O_DIR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 # 明确拒绝的特殊文件类型集合
 _SPECIAL_FILE_TYPES: frozenset[int] = frozenset({
@@ -80,8 +82,8 @@ class ResolvedPath:
         """关闭 ``dir_fd``，释放资源。"""
         try:
             os.close(self.dir_fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to close fd %d: %s", self.dir_fd, exc)
 
     def __enter__(self) -> ResolvedPath:
         return self
@@ -141,8 +143,6 @@ class ResolvedPath:
             return os.stat(self.name, dir_fd=self.dir_fd, follow_symlinks=False)
         except OSError as exc:
             _raise_cat_error(exc, self.resolved_path)
-        # 未使用
-        raise RuntimeError("unreachable")
 
 
 # ---------------------------------------------------------------------------
@@ -158,23 +158,24 @@ class SecurePathResolver:
 
     Args:
         project_root: 工程根目录绝对路径。
-        follow_symlinks: 是否跟随符号链接（默认 ``False``）。
+        符号链接策略按逐操作粒度控制（参见 :meth:`ResolvedPath.open` 和
+        :meth:`ResolvedPath.stat` 的 ``follow_symlinks`` 参数）。
     """
 
     def __init__(
         self,
         project_root: str,
-        *,
-        follow_symlinks: bool = False,
     ) -> None:
         if not project_root:
-            raise ValueError("project_root must not be empty")
+            raise CatError(ErrorCode.INTERNAL_ERROR, "Project root must not be empty")
         # 解析为规范绝对路径（非 fd-relative，仅作为引用边界对比）
         resolved = os.path.realpath(project_root)
         if not os.path.isdir(resolved):
-            raise ValueError(f"project_root is not a directory: {resolved}")
+            raise CatError(
+                ErrorCode.INTERNAL_ERROR,
+                "Project root is not a valid directory",
+            )
         self._project_root = resolved
-        self._follow_symlinks = follow_symlinks
 
     @property
     def project_root(self) -> str:
@@ -237,6 +238,14 @@ class SecurePathResolver:
 
         # 5. 拆分组件，逐级安全打开
         parts = PurePosixPath(target).parts
+
+        # 目录深度限制（防止递归遍历耗尽 fd 资源）
+        _MAX_RESOLVE_DEPTH = 64
+        if len(parts) > _MAX_RESOLVE_DEPTH:
+            raise CatError(
+                ErrorCode.INVALID_PATH,
+                f"Path depth exceeds limit ({_MAX_RESOLVE_DEPTH})",
+            )
         # PurePosixPath("/").parts == ("/",) —— 不应走到这里
         # PurePosixPath("a/b").parts == ("a", "b")
 
@@ -280,7 +289,7 @@ class SecurePathResolver:
                     # 返回父目录 fd + 文件名
                     parent_fd = current_fd
                     name = component
-                    consumed = True  # current_fd（root_fd）已交给调用方
+                    consumed = True  # current_fd（当前目录 fd）已交给调用方
                     return ResolvedPath(
                         dir_fd=parent_fd,
                         name=name,
@@ -305,25 +314,22 @@ class SecurePathResolver:
                         _raise_cat_error(exc, component)
 
                     # 关闭当前 fd（不再需要），前进到下一级
-                    if current_fd != root_fd:
-                        os.close(current_fd)
+                    # 用 try/finally 保护 next_fd：即使 close 抛出 OSError
+                    # 也不泄漏 next_fd
+                    try:
+                        if current_fd != root_fd:
+                            os.close(current_fd)
+                    except OSError:
+                        os.close(next_fd)
+                        raise
                     current_fd = next_fd
 
             # 不应到达这里——至少有一个组件才会进入循环
-            raise RuntimeError("unreachable")  # pragma: no cover
+            assert False, "unreachable"
 
-        except CatError:
-            # 异常时清理已打开的 fd；若 consumed=True 说明 root_fd
+        except (CatError, Exception):
+            # 异常时清理已打开的 fd；若 consumed=True 说明 current_fd
             # 已交给调用方由其负责关闭
-            if not consumed:
-                if current_fd != root_fd:
-                    try:
-                        os.close(current_fd)
-                    except OSError:
-                        pass
-                os.close(root_fd)
-            raise
-        except Exception:
             if not consumed:
                 if current_fd != root_fd:
                     try:
@@ -413,6 +419,13 @@ def _validate_path_format(path: str) -> None:
             "URL-style paths are not allowed",
         )
 
+    # 拒绝反斜杠（POSIX 路径名中虽合法，但常为 Windows 用户误传）
+    if "\\" in path:
+        raise CatError(
+            ErrorCode.INVALID_PATH,
+            "Backslash is not allowed in paths; use forward slash",
+        )
+
 
 def _normalize(path: str, base: str = ".") -> str:
     """将 *path* 相对 *base* 规范化为 POSIX 相对路径。
@@ -426,7 +439,7 @@ def _normalize(path: str, base: str = ".") -> str:
     """
     # PurePosixPath 做 POSIX 语义路径拼接和规范化
     # 注意：PurePosixPath 是跨平台的，这里故意用 POSIX 语义
-    if base == "." or not base:
+    if base == ".":
         joined = PurePosixPath(path)
     else:
         joined = PurePosixPath(base, path)
@@ -495,17 +508,25 @@ def _raise_cat_error(exc: OSError, path: str) -> None:
         error_code = ErrorCode.FORBIDDEN
     elif exc.errno == errno.ELOOP:
         error_code = ErrorCode.UNSAFE_PATH
+    elif exc.errno == errno.ENXIO or exc.errno == errno.EAGAIN:
+        error_code = ErrorCode.UNSAFE_PATH  # FIFO 或特殊文件阻塞
     elif exc.errno == errno.EISDIR:
         error_code = ErrorCode.IS_DIRECTORY
     elif exc.errno == errno.ENOTDIR:
         error_code = ErrorCode.NOT_DIRECTORY
+    elif exc.errno == errno.ENAMETOOLONG:
+        error_code = ErrorCode.INVALID_PATH
     elif exc.errno == errno.EEXIST:
         error_code = ErrorCode.FILE_ALREADY_EXISTS
     elif exc.errno == errno.ENOSPC:
         error_code = ErrorCode.OPERATION_FAILED
+    elif exc.errno == errno.EMFILE or exc.errno == errno.ENFILE:
+        error_code = ErrorCode.LIMIT_EXCEEDED
+    elif exc.errno == errno.EROFS:
+        error_code = ErrorCode.FORBIDDEN
     elif exc.errno == errno.EDQUOT:
         error_code = ErrorCode.LIMIT_EXCEEDED
     else:
-        error_code = ErrorCode.PATH_OUT_OF_BOUNDS
+        error_code = ErrorCode.OPERATION_FAILED
 
     raise CatError(error_code, str(exc)) from exc
