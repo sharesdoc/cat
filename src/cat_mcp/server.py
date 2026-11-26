@@ -260,7 +260,8 @@ def create_app(config: AppConfig) -> "Starlette":
 
     Initialises an ``MCPServer`` instance, registers all Cat tools, and
     returns a Starlette ASGI application serving the Streamable HTTP
-    transport.
+    transport.  Authentication middleware is applied if enabled in the
+    configuration.
 
     Args:
         config: Application configuration (limits, auth, security, etc.).
@@ -277,4 +278,51 @@ def create_app(config: AppConfig) -> "Starlette":
     _register_cat_get_capabilities(server, config)
     # Future tools are registered here as _register_*() calls.
 
-    return server.streamable_http_app()
+    # Build the Streamable HTTP ASGI app
+    app = server.streamable_http_app()
+
+    # ------------------------------------------------------------------
+    # Integrate authentication middleware
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656437-P0
+    from cat_mcp.auth import (
+        create_auth_middleware,
+        create_protected_resource_route,
+    )
+
+    # Wrap with auth middleware (handles Bearer token validation, Host
+    # header checks, and loopback bypass for development).
+    app = create_auth_middleware(app, config)
+
+    # Append OAuth Protected Resource Metadata endpoint (RFC 9728) using
+    # the SDK's standard route factory.
+    # The route is registered at a path like
+    # ``/.well-known/oauth-protected-resource/mcp``.
+    try:
+        resource_routes = create_protected_resource_route(config)
+        if resource_routes:
+            from starlette.routing import Router
+
+            router = Router()
+            for route in resource_routes:
+                router.routes.append(route)
+
+            # Save reference to streaming app before potentially rebinding
+            _inner_app = app
+
+            async def combined_app(scope: Scope, receive: Receive, send: Send) -> None:
+                if scope["type"] == "http" and scope.get("path", "").startswith(
+                    "/.well-known/"
+                ):
+                    await router(scope, receive, send)
+                else:
+                    await _inner_app(scope, receive, send)
+
+            app = combined_app  # type: ignore[assignment]
+    except Exception:
+        logger.warning(
+            "Failed to set up OAuth protected resource metadata route; "
+            "continuing without it"
+        )
+
+    return app

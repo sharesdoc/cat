@@ -83,11 +83,15 @@ class AuthConfig(BaseModel):
         audience: Expected token audience.
         require_auth: Whether authentication is required.  Must be ``True``
             when the server is publicly reachable.
+        allowed_origins: Optional list of allowed Origin header values for
+            Host/Origin header validation.  Defaults to an empty list,
+            which allows all origins.
     """
 
     issuer: str = "https://identity.example.com"
     audience: str = "cat"
     require_auth: bool = True
+    allowed_origins: list[str] = Field(default_factory=list)
 
 
 class ProjectEntry(BaseModel):
