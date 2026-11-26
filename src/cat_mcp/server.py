@@ -337,6 +337,15 @@ def create_app(
     global _access_checker
     _access_checker = AccessChecker(manager)
 
+    # ------------------------------------------------------------------
+    # QuotaManager (统一配额)
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656460-P0
+    from cat_mcp.fs.quota import QuotaManager, set_quota_manager
+
+    _quota_mgr = QuotaManager(config.limits)
+    set_quota_manager(_quota_mgr)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
