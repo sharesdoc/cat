@@ -372,6 +372,14 @@ def create_app(
     _register_cat_reader_tools(server, _workspace_mgr, manager)
 
     # ------------------------------------------------------------------
+    # Text search (CAT-16) — bounded full-text search
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656448-P0
+    from cat_mcp.fs.searcher import _register_cat_search_text
+
+    _register_cat_search_text(server, _workspace_mgr, manager)
+
+    # ------------------------------------------------------------------
     # File finder (CAT-15) — glob-based file search
     # ------------------------------------------------------------------
     # 依据: Task-R-20261126012656447-P0
