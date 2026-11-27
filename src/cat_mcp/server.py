@@ -545,6 +545,14 @@ def create_app(
 
     _register_cat_project_info_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Git tools (CAT-30) — read-only git status/diff
+    # ------------------------------------------------------------------
+    # 依据: CAT-30
+    from cat_mcp.fs.git_tools import _register_cat_git_tools
+
+    _register_cat_git_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

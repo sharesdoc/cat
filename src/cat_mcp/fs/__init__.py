@@ -28,6 +28,7 @@ from cat_mcp.fs.editor import _register_cat_edit_tools
 from cat_mcp.fs.copier import _register_cat_copy_tools
 from cat_mcp.fs.patcher import _register_cat_patch_tools
 from cat_mcp.fs.project_scanner import _register_cat_project_info_tools
+from cat_mcp.fs.git_tools import _register_cat_git_tools
 
 __all__ = [
     "SecurePathResolver",
@@ -61,4 +62,5 @@ __all__ = [
     "_register_cat_copy_tools",
     "_register_cat_patch_tools",
     "_register_cat_project_info_tools",
+    "_register_cat_git_tools",
 ]
