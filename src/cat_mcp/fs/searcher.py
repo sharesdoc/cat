@@ -218,7 +218,8 @@ class TextSearcher:
 
         # --- 搜索单个文件 ---
         if is_single_file:
-            # 单文件：已通过 resolver 确认路径安全，直接读取搜索
+            # 单文件路径已通过 SecurePathResolver 验证，但还需敏感文件检查
+            self._check_sensitive(search_root_rel)
             self._search_file_at(
                 abs_path=search_root_abs,
                 file_rel=search_root_rel,
@@ -425,8 +426,9 @@ class TextSearcher:
             try:
                 sensitive = _is_sensitive_fn(resolved_path)
             except RuntimeError:
-                # SensitiveFileChecker 未初始化 — 跳过敏感检查
-                pass
+                logger.warning(
+                    "SensitiveFileChecker not initialised — sensitive file check skipped"
+                )
 
         if sensitive:
             raise CatError(
@@ -556,6 +558,7 @@ def _register_cat_search_text(
     from cat_mcp.server import cat_tool
     from cat_mcp.projects import get_current_subject
     from cat_mcp.fs.quota import get_quota_manager
+    from cat_mcp.fs.sensitive import get_checker
 
     @cat_tool(
         server,
@@ -617,8 +620,8 @@ def _register_cat_search_text(
         max_results = min(limit, quota.max_search_results)
         timeout_seconds = float(quota.max_search_seconds)
 
-        # 创建 TextSearcher 并执行搜索
-        searcher = TextSearcher(root_path)
+        # 创建 TextSearcher 并执行搜索（传入 checker 确保敏感文件检查生效）
+        searcher = TextSearcher(root_path, sensitive_checker=get_checker())
         result = searcher.search(
             query=query,
             mode=mode,
