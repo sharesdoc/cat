@@ -40,10 +40,13 @@ def _list_changes(
     project_id: str | None = None,
     limit: int = _DEFAULT_PAGE_SIZE,
     offset: int = 0,
+    *,
+    project_root: str = "",
 ) -> dict[str, Any]:
     """查询修改历史记录。
 
     从 operations 和 audit_log 表中查询指定路径或项目的修改历史。
+    敏感文件路径在返回前过滤。
 
     Args:
         state: StateManager 实例。
@@ -52,6 +55,7 @@ def _list_changes(
         project_id: 可选项目 ID 过滤。
         limit: 最大返回记录数。
         offset: 分页偏移量。
+        project_root: 项目根目录（用于敏感文件过滤）。
 
     Returns:
         包含历史记录列表的字典。
@@ -98,9 +102,22 @@ def _list_changes(
         [*params, limit, offset],
     ).fetchall()
 
+    from cat_mcp.fs.sensitive import is_sensitive as _check_sensitive
+
     entries: list[dict[str, Any]] = []
     for row in rows:
         entry = dict(row)
+        entry_path = entry.get("path", "")
+
+        # 过滤敏感文件的路径信息
+        if project_root and entry_path:
+            full_path = os.path.join(project_root, entry_path)
+            try:
+                if _check_sensitive(full_path):
+                    continue
+            except Exception:
+                continue
+
         # 获取对应 revision
         rev = conn.execute(
             "SELECT * FROM revisions WHERE operation_id = ? ORDER BY id DESC LIMIT 1",
@@ -178,10 +195,10 @@ def _diff_file(
     if not os.path.isfile(current_path):
         raise CatError(ErrorCode.FILE_NOT_FOUND, f"File {path!r} not found")
 
-    # 读取当前文件内容
+    # 读取当前文件内容（strip 行尾以匹配 git_diff 格式）
     try:
         with open(current_path, "r", encoding="utf-8") as f:
-            current_lines = f.readlines()
+            current_lines = [line.rstrip("\n\r") for line in f]
     except (OSError, UnicodeDecodeError) as exc:
         raise CatError(
             ErrorCode.OPERATION_FAILED,
@@ -227,19 +244,28 @@ def _diff_file(
             )
 
         backup_path = os.path.join(project_root, ".cat_backup", before_ref)
-        if not os.path.isfile(backup_path):
+        # 验证备份路径在 .cat_backup 目录内
+        real_backup = os.path.realpath(backup_path)
+        real_cat_backup = os.path.realpath(os.path.join(project_root, ".cat_backup"))
+        if not real_backup.startswith(real_cat_backup + "/"):
+            raise CatError(
+                ErrorCode.PATH_OUT_OF_BOUNDS,
+                "Backup path is outside .cat_backup directory",
+            )
+
+        if not os.path.isfile(real_backup):
             raise CatError(
                 ErrorCode.FILE_NOT_FOUND,
                 f"Backup file not found: {before_ref}",
             )
 
         try:
-            with open(backup_path, "r", encoding="utf-8") as f:
-                old_lines = f.readlines()
+            with open(real_backup, "r", encoding="utf-8") as f:
+                old_lines = [line.rstrip("\n\r") for line in f]
         except (OSError, UnicodeDecodeError) as exc:
             raise CatError(
                 ErrorCode.OPERATION_FAILED,
-                f"Cannot read backup file: {exc}",
+                "Cannot read backup file",
             )
 
         # 使用 difflib 生成差异
@@ -271,7 +297,8 @@ def _diff_file(
     # --- git_base 模式：使用 Git diff ---
     if git_base is not None:
         try:
-            from cat_mcp.fs.git_tools import _run_git, _check_is_git_repo
+            from cat_mcp.fs.git_tools import _run_git, _check_is_git_repo, _validate_diff_target
+            _validate_diff_target(git_base)
         except ImportError:
             raise CatError(
                 ErrorCode.NOT_IMPLEMENTED,
@@ -389,6 +416,10 @@ def _register_cat_history_tools(
         if project is None:
             raise CatError(ErrorCode.PROJECT_NOT_FOUND, "Project not found")
 
+        project_root: str = project.get("root_path", "")
+        if not project_root:
+            raise CatError(ErrorCode.INTERNAL_ERROR, "Project root not configured")
+
         return _list_changes(
             state=state,
             subject=subject,
@@ -396,6 +427,7 @@ def _register_cat_history_tools(
             project_id=project_id,
             limit=limit,
             offset=offset,
+            project_root=project_root,
         )
 
     # ------------------------------------------------------------------
