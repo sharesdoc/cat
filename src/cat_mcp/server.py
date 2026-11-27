@@ -497,6 +497,14 @@ def create_app(
 
     _register_cat_directory_ops_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File move (CAT-24) — move/rename within project
+    # ------------------------------------------------------------------
+    # 依据: CAT-24
+    from cat_mcp.fs.mover import _register_cat_move_tools
+
+    _register_cat_move_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
