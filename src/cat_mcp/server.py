@@ -513,6 +513,14 @@ def create_app(
 
     _register_cat_trash_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File editor (CAT-21) — precise local edit
+    # ------------------------------------------------------------------
+    # 依据: CAT-21
+    from cat_mcp.fs.editor import _register_cat_edit_tools
+
+    _register_cat_edit_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
