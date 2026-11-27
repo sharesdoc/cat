@@ -553,6 +553,14 @@ def create_app(
 
     _register_cat_git_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Chunked I/O (CAT-33) — chunked upload/download
+    # ------------------------------------------------------------------
+    # 依据: CAT-33
+    from cat_mcp.fs.chunked_io import _register_cat_chunked_io_tools
+
+    _register_cat_chunked_io_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

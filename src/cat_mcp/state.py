@@ -20,7 +20,7 @@ from cat_mcp.errors import CatError, ErrorCode
 # Schema version and DDL
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_DDL = """
 CREATE TABLE projects (
@@ -209,7 +209,40 @@ class StateManager:
         if current_version < 1:
             with self._conn:
                 self._conn.executescript(SCHEMA_DDL)
-                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                self._conn.execute("PRAGMA user_version = 1")
+                current_version = 1
+
+        if current_version < 2:
+            with self._conn:
+                self._conn.executescript("""
+                    CREATE TABLE upload_sessions (
+                        upload_id TEXT PRIMARY KEY,
+                        subject TEXT NOT NULL,
+                        workspace_id TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        expected_size INTEGER NOT NULL,
+                        expected_sha256 TEXT NOT NULL,
+                        chunk_count INTEGER NOT NULL DEFAULT 0,
+                        total_received INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        expires_at TEXT NOT NULL,
+                        completed_at TEXT
+                    );
+                    CREATE INDEX idx_upload_subject ON upload_sessions(subject);
+                    CREATE INDEX idx_upload_status ON upload_sessions(status);
+
+                    CREATE TABLE upload_chunks (
+                        upload_id TEXT NOT NULL REFERENCES upload_sessions(upload_id),
+                        chunk_index INTEGER NOT NULL,
+                        chunk_sha256 TEXT NOT NULL,
+                        temp_path TEXT NOT NULL,
+                        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (upload_id, chunk_index)
+                    );
+                """)
+                self._conn.execute("PRAGMA user_version = 2")
 
     # ------------------------------------------------------------------
     # Projects
@@ -717,5 +750,139 @@ class StateManager:
         rows = self._conn.execute(
             f"SELECT * FROM audit_log {where} ORDER BY timestamp DESC LIMIT ?",
             [*params, limit],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Upload sessions (CAT-33)
+    # ------------------------------------------------------------------
+
+    def create_upload_session(
+        self,
+        upload_id: str,
+        subject: str,
+        workspace_id: str,
+        project_id: str,
+        path: str,
+        expected_size: int,
+        expected_sha256: str,
+        expires_at: str,
+    ) -> dict[str, Any]:
+        """Create a new chunked upload session.
+
+        Returns the inserted row as a dict.
+        """
+        now = _now()
+        self._conn.execute(
+            "INSERT INTO upload_sessions "
+            "(upload_id, subject, workspace_id, project_id, path, "
+            " expected_size, expected_sha256, chunk_count, total_received, "
+            " status, started_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'active', ?, ?)",
+            (
+                upload_id, subject, workspace_id, project_id, path,
+                expected_size, expected_sha256, now, expires_at,
+            ),
+        )
+        row = self._conn.execute(
+            "SELECT * FROM upload_sessions WHERE upload_id = ?", (upload_id,)
+        ).fetchone()
+        return dict(row)
+
+    def get_upload_session(self, upload_id: str) -> dict[str, Any] | None:
+        """Retrieve an upload session by *upload_id*, or return *None*."""
+        row = self._conn.execute(
+            "SELECT * FROM upload_sessions WHERE upload_id = ?", (upload_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def update_upload_session_status(
+        self, upload_id: str, status: str,
+    ) -> bool:
+        """Update the status of an upload session.
+
+        Terminal states also set ``completed_at``.
+        Returns *True* if a row was updated.
+        """
+        if status in ("completed", "aborted", "expired"):
+            now = _now()
+            cur = self._conn.execute(
+                "UPDATE upload_sessions "
+                "SET status = ?, completed_at = ? "
+                "WHERE upload_id = ?",
+                (status, now, upload_id),
+            )
+        else:
+            cur = self._conn.execute(
+                "UPDATE upload_sessions SET status = ? WHERE upload_id = ?",
+                (status, upload_id),
+            )
+        return cur.rowcount > 0
+
+    def increment_upload_chunks(
+        self, upload_id: str, size_bytes: int,
+    ) -> bool:
+        """Increment chunk count and received size for an upload session."""
+        cur = self._conn.execute(
+            "UPDATE upload_sessions "
+            "SET chunk_count = chunk_count + 1, "
+            "    total_received = total_received + ? "
+            "WHERE upload_id = ? AND status = 'active'",
+            (size_bytes, upload_id),
+        )
+        return cur.rowcount > 0
+
+    def record_upload_chunk(
+        self,
+        upload_id: str,
+        chunk_index: int,
+        chunk_sha256: str,
+        temp_path: str,
+    ) -> dict[str, Any]:
+        """Record a received chunk.
+
+        Returns the inserted row as a dict.
+        """
+        now = _now()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO upload_chunks "
+            "(upload_id, chunk_index, chunk_sha256, temp_path, received_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (upload_id, chunk_index, chunk_sha256, temp_path, now),
+        )
+        row = self._conn.execute(
+            "SELECT * FROM upload_chunks "
+            "WHERE upload_id = ? AND chunk_index = ?",
+            (upload_id, chunk_index),
+        ).fetchone()
+        return dict(row)
+
+    def get_upload_chunks(self, upload_id: str) -> list[dict[str, Any]]:
+        """Return all chunks for an upload session, ordered by index."""
+        rows = self._conn.execute(
+            "SELECT * FROM upload_chunks "
+            "WHERE upload_id = ? ORDER BY chunk_index",
+            (upload_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_upload_session(self, upload_id: str) -> bool:
+        """Delete an upload session and its chunks."""
+        self._conn.execute(
+            "DELETE FROM upload_chunks WHERE upload_id = ?", (upload_id,)
+        )
+        cur = self._conn.execute(
+            "DELETE FROM upload_sessions WHERE upload_id = ?", (upload_id,)
+        )
+        return cur.rowcount > 0
+
+    def expire_stale_uploads(
+        self, before: str,
+    ) -> list[dict[str, Any]]:
+        """Return all active uploads that have expired."""
+        rows = self._conn.execute(
+            "SELECT * FROM upload_sessions "
+            "WHERE status = 'active' AND expires_at < ?",
+            (before,),
         ).fetchall()
         return [dict(r) for r in rows]

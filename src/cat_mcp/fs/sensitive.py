@@ -91,6 +91,8 @@ _DEFAULT_DENY_PATTERNS: list[str] = [
     ".cat_backup",
     ".cat_backup/*",
     ".cat_partial",
+    ".cat_uploads",
+    ".cat_uploads/*",
 ]
 
 # 编译后的模式缓存（.env.example 以例外形式处理）
