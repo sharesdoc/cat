@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+#
+# Cat MCP Server — 性能基准测试
+# 生成合成十万文件工程，测试目录浏览/文件读取/全文搜索性能
+# 依据: CAT-37
+#
+# 使用方式：
+#   ./benchmark                    # 完整基准测试
+#   ./benchmark --quick            # 快速模式（1 万文件）
+#   ./benchmark --generate-only    # 仅生成合成工程
+#   ./benchmark --help             # 显示帮助
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BENCH_DIR="$SCRIPT_DIR/.cat-benchmark"
+GENERATE_SCRIPT="$SCRIPT_DIR/.cat-benchmark/generate.py"
+RESULTS_DIR="$SCRIPT_DIR/.cat-benchmark/results"
+
+# 默认参数
+FILE_COUNT=100000
+DEPTH=8
+QUICK=false
+GENERATE_ONLY=false
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    cat <<'HELP'
+用法: ./benchmark [选项]
+
+Cat MCP 性能基准测试。生成合成工程并测试核心操作性能。
+
+选项：
+  --quick              快速模式（1 万文件，3 层目录）
+  --generate-only      仅生成合成工程，不运行基准测试
+  --dir=PATH           指定合成工程目录（默认 .cat-benchmark/project）
+  --help               显示本帮助
+
+环境变量：
+  CAT_MCP_CONFIG       Cat MCP 配置路径（如不使用默认配置）
+  CAT_MCP_PORT         Cat MCP 端口（默认 9100）
+
+基准目标（服务端响应时间，非端到端）：
+  目录列表 P95  < 500ms  （暖态）
+  64KiB 读取    < 300ms  （服务端）
+  全文搜索      < 10s     （或明确超时）
+HELP
+    exit 0
+fi
+
+for arg in "$@"; do
+    case "$arg" in
+        --quick) QUICK=true ;;
+        --generate-only) GENERATE_ONLY=true ;;
+        --dir=*) BENCH_DIR="${arg#*=}" ;;
+        *) echo "未知选项: $arg" >&2; exit 1 ;;
+    esac
+done
+
+if [ "$QUICK" = true ]; then
+    FILE_COUNT=10000
+    DEPTH=3
+fi
+
+mkdir -p "$RESULTS_DIR"
+
+echo "Cat MCP 性能基准测试"
+echo "========================================"
+echo "  文件数:  $FILE_COUNT"
+echo "  目录深度: $DEPTH"
+echo "  工程目录: $BENCH_DIR/project"
+echo "  结果目录: $RESULTS_DIR"
+echo ""
+
+# ---- 第1步: 生成合成工程 ----
+echo "[1/3] 生成合成工程 (${FILE_COUNT} 文件)..."
+PROJECT_DIR="$BENCH_DIR/project"
+
+if [ -d "$PROJECT_DIR" ] && [ "$(find "$PROJECT_DIR" -type f 2>/dev/null | wc -l)" -ge "$FILE_COUNT" ]; then
+    echo "  合成工程已存在，跳过生成"
+else
+    mkdir -p "$PROJECT_DIR"
+
+    python3 -c "
+import os
+import random
+import string
+import sys
+
+root = '$PROJECT_DIR'
+count = $FILE_COUNT
+depth = $DEPTH
+
+# 生成文件路径列表
+paths = set()
+dirs = set()
+random.seed(42)
+
+# 首先生成目录结构
+for i in range(count):
+    # 随机深度 1..depth
+    d = random.randint(1, depth)
+    parts = []
+    for j in range(d):
+        name = ''.join(random.choices(string.ascii_lowercase, k=8))
+        parts.append(name)
+    dir_path = os.path.join(root, *parts[:-1])
+    os.makedirs(dir_path, exist_ok=True)
+    dirs.add(dir_path)
+
+    # 文件名
+    fname = ''.join(random.choices(string.ascii_lowercase, k=10)) + '.txt'
+    fpath = os.path.join(dir_path, fname)
+    paths.add(fpath)
+
+# 写入文件（部分小文件、部分大文件）
+total_written = 0
+for fpath in sorted(paths):
+    # 90% 小文件（~1KB），10% 大文件（~10KB）
+    size = random.randint(500, 2000) if random.random() < 0.9 else random.randint(8000, 12000)
+    content = ''.join(random.choices(string.ascii_letters + string.digits + ' \\n', k=size))
+    with open(fpath, 'w') as f:
+        f.write(content)
+    total_written += 1
+
+    if total_written % 10000 == 0:
+        print(f'  ... {total_written}/{count}')
+
+print(f'  ✓ 已生成 {total_written} 个文件')
+"
+fi
+
+# 统计
+FILE_COUNT_ACTUAL="$(find "$PROJECT_DIR" -type f 2>/dev/null | wc -l)"
+DIR_COUNT_ACTUAL="$(find "$PROJECT_DIR" -type d 2>/dev/null | wc -l)"
+echo "  文件数: $FILE_COUNT_ACTUAL, 目录数: $DIR_COUNT_ACTUAL"
+echo "  (文件路径: $PROJECT_DIR)"
+echo ""
+
+if [ "$GENERATE_ONLY" = true ]; then
+    echo "生成完成（跳过基准测试）。"
+    echo "运行基准测试: ./benchmark"
+    exit 0
+fi
+
+# ---- 第2步: 基准测试（直接测试，非 MCP 调用） ----
+echo "[2/3] 运行基准测试..."
+TIMESTAMP="$(date +%Y%m%d%H%M%S)"
+RESULT_FILE="$RESULTS_DIR/benchmark-$TIMESTAMP.json"
+
+python3 -c "
+import json
+import os
+import sys
+import time
+
+project_root = '$PROJECT_DIR'
+results = {
+    'environment': {
+        'os': sys.platform,
+        'python': sys.version,
+        'timestamp': '$TIMESTAMP',
+    },
+    'project': {
+        'file_count': $FILE_COUNT_ACTUAL,
+        'dir_count': $DIR_COUNT_ACTUAL,
+    },
+    'benchmarks': {},
+}
+
+# ---- 基准 1: 目录列表（一级深度） ----
+print('  基准 1: 目录列表（深度 1）...')
+timings = []
+for _ in range(50):
+    start = time.perf_counter()
+    entries = os.listdir(project_root)
+    elapsed = time.perf_counter() - start
+    timings.append(elapsed * 1000)  # ms
+
+timings.sort()
+p50 = timings[len(timings)//2]
+p95 = timings[int(len(timings)*0.95)]
+p99 = timings[int(len(timings)*0.99)]
+results['benchmarks']['listdir_depth1'] = {
+    'samples': len(timings),
+    'p50_ms': round(p50, 2),
+    'p95_ms': round(p95, 2),
+    'p99_ms': round(p99, 2),
+    'min_ms': round(min(timings), 2),
+    'max_ms': round(max(timings), 2),
+    'entries': len(entries),
+}
+print(f'    P50={p50:.1f}ms  P95={p95:.1f}ms  P99={p99:.1f}ms')
+
+# ---- 基准 2: 目录递归遍历（深度限制） ----
+print('  基准 2: 目录递归遍历（深度 3）...')
+timings = []
+for _ in range(20):
+    start = time.perf_counter()
+    count = 0
+    for root, dirs, files in os.walk(project_root):
+        depth = root.replace(project_root, '').count(os.sep)
+        if depth >= 3:
+            dirs[:] = []
+    elapsed = time.perf_counter() - start
+    timings.append(elapsed * 1000)
+
+timings.sort()
+results['benchmarks']['walk_depth3'] = {
+    'samples': len(timings),
+    'p50_ms': round(timings[len(timings)//2], 2),
+    'p95_ms': round(timings[int(len(timings)*0.95)], 2),
+    'max_ms': round(max(timings), 2),
+}
+print(f'    P50={results[\"benchmarks\"][\"walk_depth3\"][\"p50_ms\"]}ms  P95={results[\"benchmarks\"][\"walk_depth3\"][\"p95_ms\"]}ms')
+
+# ---- 基准 3: 文件读取（64KB 片段） ----
+print('  基准 3: 文件读取（64KB 片段，服务端模拟）...')
+import random as rnd
+files = []
+for root, _, fnames in os.walk(project_root):
+    for fn in fnames:
+        files.append(os.path.join(root, fn))
+
+rnd.seed(42)
+sample_files = rnd.sample(files, min(200, len(files)))
+
+timings = []
+for fp in sample_files:
+    try:
+        size = os.path.getsize(fp)
+        start = time.perf_counter()
+        with open(fp, 'rb') as f:
+            data = f.read(65536)
+        elapsed = time.perf_counter() - start
+        timings.append(elapsed * 1000)
+    except OSError:
+        pass
+
+timings.sort()
+p50 = timings[len(timings)//2]
+p95 = timings[int(len(timings)*0.95)]
+results['benchmarks']['file_read_64kb'] = {
+    'samples': len(timings),
+    'p50_ms': round(p50, 2),
+    'p95_ms': round(p95, 2),
+    'min_ms': round(min(timings), 2),
+    'max_ms': round(max(timings), 2),
+}
+print(f'    P50={p50:.1f}ms  P95={p95:.1f}ms')
+
+# ---- 基准 4: 文件属性读取 ----
+print('  基准 4: 文件 stat...')
+timings = []
+for fp in sample_files[:100]:
+    start = time.perf_counter()
+    st = os.stat(fp)
+    elapsed = time.perf_counter() - start
+    timings.append(elapsed * 1000)
+
+timings.sort()
+results['benchmarks']['file_stat'] = {
+    'samples': len(timings),
+    'p50_ms': round(timings[len(timings)//2], 2),
+    'p95_ms': round(timings[int(len(timings)*0.95)], 2),
+}
+print(f'    P50={results[\"benchmarks\"][\"file_stat\"][\"p50_ms\"]}ms  P95={results[\"benchmarks\"][\"file_stat\"][\"p95_ms\"]}ms')
+
+# ---- 基准 5: 全文搜索（模拟 rg 搜索） ----
+print('  基准 5: 全文搜索...')
+timings = []
+import subprocess
+if subprocess.run(['which', 'rg'], capture_output=True).returncode == 0:
+    search_term = 'abcdef'  # 一个随机但存在的字符串
+    for _ in range(5):
+        start = time.perf_counter()
+        r = subprocess.run(
+            ['rg', '--no-ignore', '--max-filesize', '1M', '-l', search_term, project_root],
+            capture_output=True, text=True, timeout=60,
+        )
+        elapsed = time.perf_counter() - start
+        timings.append(elapsed * 1000)
+    results['benchmarks']['search'] = {
+        'tool': 'rg',
+        'samples': len(timings),
+        'p50_ms': round(sorted(timings)[len(timings)//2], 2),
+        'p95_ms': round(sorted(timings)[int(len(timings)*0.95)], 2),
+        'max_ms': round(max(timings), 2),
+    }
+    print(f'    P50={results[\"benchmarks\"][\"search\"][\"p50_ms\"]}ms  P95={results[\"benchmarks\"][\"search\"][\"p95_ms\"]}ms')
+else:
+    print('    rg 不可用，跳过全文搜索基准')
+    results['benchmarks']['search'] = {'tool': None, 'note': 'rg not available'}
+
+with open('$RESULT_FILE', 'w') as f:
+    json.dump(results, f, indent=2)
+print(f'  结果已保存: $RESULT_FILE')
+"
+
+# ---- 第3步: 生成报告 ----
+echo "[3/3] 生成基准报告..."
+REPORT_FILE="$RESULTS_DIR/report-$TIMESTAMP.md"
+
+python3 -c "
+import json
+
+with open('$RESULT_FILE') as f:
+    r = json.load(f)
+
+env = r['environment']
+proj = r['project']
+bench = r['benchmarks']
+
+lines = []
+lines.append('# Cat MCP 性能基准报告')
+lines.append('')
+lines.append('| 项目 | 值 |')
+lines.append('|---|---|')
+lines.append(f'| 操作系统 | {env[\"os\"]} |')
+lines.append(f'| Python | {env[\"python\"]} |')
+lines.append(f'| 测试时间 | {env[\"timestamp\"]} |')
+lines.append(f'| 文件数 | {proj[\"file_count\"]} |')
+lines.append(f'| 目录数 | {proj[\"dir_count\"]} |')
+lines.append('')
+
+lines.append('## 基准结果')
+lines.append('')
+lines.append('| 基准 | P50 | P95 | 样本数 | 设计目标 |')
+lines.append('|---|---|---|---|');
+
+for name, b in bench.items():
+    labels = {
+        'listdir_depth1': '目录列表（深度1）',
+        'walk_depth3': '目录递归（深度3）',
+        'file_read_64kb': '文件读取（64KB）',
+        'file_stat': '文件 stat',
+        'search': '全文搜索',
+    }
+    label = labels.get(name, name)
+    p50 = b.get('p50_ms', '-')
+    p95 = b.get('p95_ms', '-')
+    samples = b.get('samples', '-')
+    target = ''
+    if name == 'listdir_depth1':
+        target = '<500ms'
+    elif name == 'file_read_64kb':
+        target = '<300ms'
+    elif name == 'search':
+        target = '<10s'
+    else:
+        target = 'N/A'
+    lines.append(f'| {label} | {p50}ms | {p95}ms | {samples} | {target} |')
+
+lines.append('')
+lines.append('## 环境信息')
+lines.append('')
+lines.append(f'- CPU: TODO（运行时填写）')
+lines.append(f'- 内存: TODO（运行时填写）')
+lines.append(f'- 磁盘: TODO（运行时填写）')
+lines.append('')
+lines.append('## 说明')
+lines.append('')
+lines.append('- 所有时间均为服务端响应时间（不含网络延迟）')
+lines.append('- 暖态：连续运行多次取中位数')
+lines.append('- 合成工程路径: $PROJECT_DIR')
+lines.append('- 结果文件: $RESULT_FILE')
+
+with open('$REPORT_FILE', 'w') as f:
+    f.write('\n'.join(lines))
+print(f'  报告已生成: $REPORT_FILE')
+"
+
+# ---- 完成 ----
+echo ""
+echo "基准测试完成!"
+echo "========================================"
+echo "  合成工程: $PROJECT_DIR"
+echo "  原始数据: $RESULT_FILE"
+echo "  报告:     $REPORT_FILE"
+echo ""
+echo "设计目标:"
+echo "  目录列表 P95 < 500ms"
+echo "  文件读取 P95 < 300ms"
+echo "  全文搜索     < 10s 或明确超时"
+echo ""

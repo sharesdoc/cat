@@ -142,3 +142,6 @@ config.toml
 /backups/
 /audit/
 /workspace_state/
+/.cat_uploads/
+/.cat_benchmark/
+/.cat-benchmark/
