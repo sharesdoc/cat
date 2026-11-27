@@ -371,6 +371,14 @@ def create_app(
 
     _register_cat_reader_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File finder (CAT-15) — glob-based file search
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656447-P0
+    from cat_mcp.fs.finder import _register_cat_finder_tools
+
+    _register_cat_finder_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
