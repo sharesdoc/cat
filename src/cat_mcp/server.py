@@ -481,6 +481,14 @@ def create_app(
 
     _register_cat_finder_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File writer (CAT-20) — single-file create/replace
+    # ------------------------------------------------------------------
+    # 依据: CAT-20
+    from cat_mcp.fs.writer import _register_cat_write_tools as _register_cat_write_file_tools
+
+    _register_cat_write_file_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

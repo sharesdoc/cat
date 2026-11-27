@@ -146,17 +146,19 @@ class AtomicWriter:
         workspace: dict[str, Any] | None = None,
         request_id: str | None = None,
         subject: str | None = None,
+        expected_version: str | None = None,
     ) -> CommitContext:
         """准备一次原子写入：创建操作记录 + 写入临时文件。
 
         流程：
         1. 通过 WriteLockManager 获取文件写入锁
-        2. 使用 ``resolver`` 解析目标路径的安全父目录 fd
-        3. 在父目录 fd 上用 ``O_CREAT|O_EXCL`` 创建唯一临时文件
-        4. 写入 *content* 并 ``fsync``
-        5. 计算内容 SHA-256 哈希
-        6. 在 ``operations`` 表中创建 PREPARED 状态记录
-        7. 如果目标文件已存在，备份旧文件至 ``.cat_backup``
+        2. 锁内校验 ``expected_version``（消除 TOCTOU 窗口）
+        3. 使用 ``resolver`` 解析目标路径的安全父目录 fd
+        4. 在父目录 fd 上用 ``O_CREAT|O_EXCL`` 创建唯一临时文件
+        5. 写入 *content* 并 ``fsync``
+        6. 计算内容 SHA-256 哈希
+        7. 在 ``operations`` 表中创建 PREPARED 状态记录
+        8. 如果目标文件已存在，备份旧文件至 ``.cat_backup``
 
         Args:
             file_path: 目标文件工程相对路径（如 ``"src/main.py"``）。
@@ -164,6 +166,7 @@ class AtomicWriter:
             workspace: 工作空间字典（含 ``id``, ``subject`` 等）。
             request_id: 请求标识（用于关联操作记录）。
             subject: 主体标识（未通过 workspace 提供时使用）。
+            expected_version: replace 模式预期版本哈希。锁内校验，消除 TOCTOU。
 
         Returns:
             :class:`CommitContext`，包含临时文件路径和操作 ID。
@@ -183,6 +186,10 @@ class AtomicWriter:
                 req_id = workspace.get("request_id", "")
 
         lock_ctx = self._lock_mgr.acquire_write_lock(subj, [file_path], timeout=30.0)
+
+        # 0.5 锁内版本校验（消除 TOCTOU 窗口）
+        if expected_version is not None:
+            self._lock_mgr.check_version(file_path, expected_version, self._resolver)
 
         # 计算内容哈希（内容已知，可提前计算）
         file_hash = hashlib.sha256(content).hexdigest()
@@ -290,17 +297,28 @@ class AtomicWriter:
             input_digest=file_hash,
         )
         if not is_new:
-            # 幂等命中：清理刚写入的临时文件，释放锁，返回已有结果
-            _cleanup_temp_path(temp_abs)
-            self._lock_mgr.release_write_lock(lock_ctx.lock_id)
-            status = CommitStatus.COMMITTED if op.get("status") == "committed" else CommitStatus.PREPARED
+            existing_status = op.get("status", "")
+            if existing_status in ("committed", "failed"):
+                # 最终态：清理本次创建的临时文件和锁，返回已有结果
+                _cleanup_temp_path(temp_abs)
+                self._lock_mgr.release_write_lock(lock_ctx.lock_id)
+                return CommitContext(
+                    operation_id=op.get("id", ""),
+                    target_path=file_path,
+                    temp_path=temp_abs,
+                    backup_path=backup_path,
+                    status=CommitStatus.COMMITTED if existing_status == "committed" else CommitStatus.ABORTED,
+                    file_hash=file_hash,
+                )
+            # prepared / in_doubt → 保留锁和临时文件，让调用方继续 commit
             return CommitContext(
                 operation_id=op.get("id", ""),
                 target_path=file_path,
                 temp_path=temp_abs,
                 backup_path=backup_path,
-                status=status,
+                status=CommitStatus.PREPARED,
                 file_hash=file_hash,
+                _lock_ctx=lock_ctx,
             )
 
         operation_id = op["id"] if op else ""
