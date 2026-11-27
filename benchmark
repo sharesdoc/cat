@@ -61,6 +61,25 @@ if [ "$QUICK" = true ]; then
     DEPTH=3
 fi
 
+# 路径安全检查：BENCH_DIR 必须在脚本目录或 /tmp 下
+# 防止通过 --dir= 参数进行路径注入或 Python 代码注入
+case "$BENCH_DIR" in
+    "$SCRIPT_DIR"/*) ;;
+    /tmp/*) ;;
+    *)
+        echo "错误: BENCH_DIR ($BENCH_DIR) 必须在脚本目录或 /tmp 下" >&2
+        exit 1
+        ;;
+esac
+
+# 拒绝路径中的特殊字符（防止单引号突破 Python 内联字符串）
+case "$BENCH_DIR" in
+    *"'"* | *'"'* | *'`'*)
+        echo "错误: BENCH_DIR 不能包含单引号、双引号或反引号" >&2
+        exit 1
+        ;;
+esac
+
 mkdir -p "$RESULTS_DIR"
 
 echo "Cat MCP 性能基准测试"
