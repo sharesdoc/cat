@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+#
+# Cat MCP Server — 卸载脚本
+# 保留工程文件和数据，仅移除运行时文件和配置
+# 依据: CAT-35
+#
+# 使用方式：
+#   ./uninstall              # 交互式卸载（保留工程）
+#   ./uninstall --purge      # 完全清除（含数据）
+#   ./uninstall --help       # 显示帮助
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+OS="$(uname -s)"
+
+PREFIX=""
+PURGE=false
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    cat <<'HELP'
+用法: ./uninstall [选项]
+
+卸载 Cat MCP 服务器。默认保留工程文件和数据目录。
+
+选项：
+  --prefix=PATH    指定安装前缀（默认 /opt/cat-mcp 或 ~/.local/opt/cat-mcp）
+  --purge          完全清除（含数据目录和配置文件）
+  --help           显示本帮助
+HELP
+    exit 0
+fi
+
+for arg in "$@"; do
+    case "$arg" in
+        --prefix=*) PREFIX="${arg#*=}" ;;
+        --purge) PURGE=true ;;
+        *) echo "未知选项: $arg" >&2; exit 1 ;;
+    esac
+done
+
+if [ -z "$PREFIX" ]; then
+    if [ "$OS" = "Linux" ]; then
+        PREFIX="/opt/cat-mcp"
+    else
+        PREFIX="$HOME/.local/opt/cat-mcp"
+    fi
+fi
+
+DATA_DIR="/var/lib/cat"
+CONFIG_DIR="/etc/cat"
+if [ "$OS" != "Linux" ]; then
+    DATA_DIR="$PREFIX/var"
+    CONFIG_DIR="$PREFIX/etc"
+fi
+
+echo "Cat MCP Server 卸载程序"
+echo "========================================"
+echo "  安装路径: $PREFIX"
+echo "  数据目录: $DATA_DIR"
+echo "  配置目录: $CONFIG_DIR"
+echo ""
+
+# ---- 停止服务 ----
+if [ "$OS" = "Linux" ] && systemctl is-active --quiet cat-mcp 2>/dev/null; then
+    echo "[1/3] 停止 cat-mcp 服务..."
+    systemctl stop cat-mcp
+    systemctl disable cat-mcp 2>/dev/null || true
+fi
+
+# ---- 移除安装文件 ----
+echo "[2/3] 移除安装文件..."
+
+# 移除符号链接
+if [ "$OS" = "Linux" ] && [ -L "/usr/local/bin/cat-mcp" ]; then
+    rm -f "/usr/local/bin/cat-mcp"
+fi
+
+# 移除 systemd 服务
+if [ "$OS" = "Linux" ] && [ -f "/etc/systemd/system/cat-mcp.service" ]; then
+    rm -f "/etc/systemd/system/cat-mcp.service"
+    systemctl daemon-reload 2>/dev/null || true
+    echo "  已移除 systemd 服务"
+fi
+
+# 移除安装目录
+if [ -d "$PREFIX" ]; then
+    rm -rf "$PREFIX/bin" "$PREFIX/VERSION" "$PREFIX/INSTALL_TIME" "$PREFIX/backups"
+    echo "  已移除 $PREFIX 运行时文件"
+    # 如果 --purge，移除整个安装目录
+    if [ "$PURGE" = true ]; then
+        rm -rf "$PREFIX"
+        echo "  已完全清除 $PREFIX"
+    else
+        echo "  保留 $PREFIX 目录（含工程备份）"
+    fi
+fi
+
+# ---- 清理数据（仅 --purge） ----
+if [ "$PURGE" = true ]; then
+    echo "[3/3] 清除数据目录..."
+    if [ -d "$DATA_DIR" ]; then
+        rm -rf "$DATA_DIR"
+        echo "  已清除 $DATA_DIR"
+    fi
+    if [ -d "$CONFIG_DIR" ]; then
+        rm -rf "$CONFIG_DIR"
+        echo "  已清除 $CONFIG_DIR"
+    fi
+    echo ""
+    echo "Cat MCP 已完全卸载（含数据）。"
+else
+    echo "[3/3] 跳过数据清除"
+    echo ""
+    echo "卸载完成!"
+    echo "  保留: $DATA_DIR（工程数据）"
+    echo "  保留: $CONFIG_DIR（配置文件）"
+    echo ""
+    echo "如需完全清除数据和配置，运行:"
+    echo "  ./uninstall --purge"
+fi
+
+echo ""
+echo "工程代码保留在: $SCRIPT_DIR"
+echo ""

@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+#
+# Cat MCP Server — 原生安装脚本
+# 支持 Linux (amd64/arm64) 和 macOS
+# 安装到 /opt/cat-mcp（Linux）或 ~/.local/opt/cat-mcp（macOS）
+# 依据: CAT-35
+#
+# 使用方式：
+#   ./install                 # 交互式安装
+#   ./install --prefix=/opt   # 指定安装前缀
+#   ./install --unattended    # 非交互式安装（使用默认配置）
+#   ./install --help          # 显示帮助
+
+set -euo pipefail
+
+# ---- 默认值 ----
+VERSION="1.0.0"
+PYTHON="${PYTHON:-python3}"
+PIP="${PIP:-pip3}"
+
+# ---- 检测系统 ----
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+if [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    ARCH="arm64"
+fi
+
+# ---- 帮助 ----
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    cat <<'HELP'
+用法: ./install [选项]
+
+安装 Cat MCP 服务器到系统。
+
+选项：
+  --prefix=PATH        指定安装前缀（Linux 默认 /opt/cat-mcp，macOS 默认 ~/.local/opt/cat-mcp）
+  --config=PATH        指定配置模板路径（默认 config.yaml 或 docker-compose.yml）
+  --unattended         非交互式安装
+  --no-service         不安装 systemd 服务
+  --help               显示本帮助
+
+环境变量：
+  PYTHON               Python 解释器路径（默认 python3）
+  PIP                  pip 路径（默认 pip3）
+
+示例：
+  ./install
+  ./install --prefix=/srv/cat
+  ./install --unattended --no-service
+HELP
+    exit 0
+fi
+
+# ---- 参数解析 ----
+PREFIX=""
+CONFIG_SRC=""
+UNATTENDED=false
+NO_SERVICE=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --prefix=*) PREFIX="${arg#*=}" ;;
+        --config=*) CONFIG_SRC="${arg#*=}" ;;
+        --unattended) UNATTENDED=true ;;
+        --no-service) NO_SERVICE=true ;;
+        --help|-h) ;; # already handled
+        *) echo "未知选项: $arg" >&2; exit 1 ;;
+    esac
+done
+
+# ---- 确定安装路径 ----
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ -z "$PREFIX" ]; then
+    if [ "$OS" = "Linux" ]; then
+        PREFIX="/opt/cat-mcp"
+    else
+        PREFIX="$HOME/.local/opt/cat-mcp"
+    fi
+fi
+
+SERVICE_SRC="$SCRIPT_DIR/cat-mcp.service"
+
+CONFIG_DIR="/etc/cat"
+DATA_DIR="/var/lib/cat"
+SERVICE_DIR="/etc/systemd/system"
+
+if [ "$OS" != "Linux" ]; then
+    CONFIG_DIR="$PREFIX/etc"
+    DATA_DIR="$PREFIX/var"
+    NO_SERVICE=true
+fi
+
+echo "Cat MCP Server v${VERSION} 安装程序"
+echo "========================================"
+echo "  系统:     $OS ($ARCH)"
+echo "  安装到:   $PREFIX"
+echo "  配置:     $CONFIG_DIR"
+echo "  数据:     $DATA_DIR"
+echo "  Python:   $PYTHON"
+echo ""
+
+# ---- 检查 Python 版本 ----
+echo "[1/5] 检查 Python 版本..."
+PY_VER="$($PYTHON --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)" || {
+    echo "错误: 找不到 Python 3" >&2
+    exit 1
+}
+if [ "$(echo "$PY_VER" | cut -d. -f1)" -lt 3 ] || \
+   { [ "$(echo "$PY_VER" | cut -d. -f1)" -eq 3 ] && \
+     [ "$(echo "$PY_VER" | cut -d. -f2)" -lt 12 ]; }; then
+    echo "错误: 需要 Python 3.12+（当前: $PY_VER）" >&2
+    exit 1
+fi
+echo "  Python $PY_VER — OK"
+
+# ---- 创建目录 ----
+echo "[2/5] 创建目录..."
+mkdir -p "$PREFIX"
+mkdir -p "$PREFIX/bin"
+mkdir -p "$DATA_DIR"
+sudo mkdir -p "$CONFIG_DIR" 2>/dev/null || mkdir -p "$CONFIG_DIR"
+
+# ---- 安装包 ----
+echo "[3/5] 安装 Cat MCP 包..."
+cd "$SCRIPT_DIR"
+
+# 推荐使用 uv（如果可用）
+if command -v uv &>/dev/null; then
+    echo "  使用 uv 安装..."
+    uv pip install --system -e . 2>/dev/null || \
+        uv pip install -e .
+else
+    echo "  使用 pip 安装..."
+    $PIP install --no-cache-dir -e .
+fi
+
+# ---- 创建启动脚本 ----
+echo "[4/5] 创建启动脚本..."
+cat > "$PREFIX/bin/cat-mcp" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 -m cat_mcp "$@"
+SCRIPT
+chmod +x "$PREFIX/bin/cat-mcp"
+
+# 创建符号链接
+if [ "$OS" = "Linux" ] && [ -d "/usr/local/bin" ]; then
+    ln -sf "$PREFIX/bin/cat-mcp" "/usr/local/bin/cat-mcp" 2>/dev/null || true
+fi
+
+# 复制配置示例（从项目仓库复制 config.yaml 或 docker-compose 配置）
+CONFIG_SRC="$SCRIPT_DIR/config.yaml"
+if [ -f "$CONFIG_SRC" ]; then
+    if [ ! -f "$CONFIG_DIR/cat.yaml" ]; then
+        mkdir -p "$CONFIG_DIR" 2>/dev/null
+        cp "$CONFIG_SRC" "$CONFIG_DIR/cat.yaml" 2>/dev/null || true
+        echo "  配置模板: $CONFIG_DIR/cat.yaml（请按需修改）"
+    else
+        echo "  配置已存在，跳过复制"
+    fi
+fi
+
+# 记录版本
+echo "$VERSION" > "$PREFIX/VERSION"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$PREFIX/INSTALL_TIME"
+mkdir -p "$PREFIX/backups"
+
+# ---- 安装 systemd 服务 ----
+if [ "$NO_SERVICE" = false ] && [ "$OS" = "Linux" ]; then
+    echo "[5/5] 安装 systemd 服务..."
+    SERVICE_FILE="$SERVICE_DIR/cat-mcp.service"
+
+    if [ -f "$SERVICE_FILE" ]; then
+        echo "  服务文件已存在 ($SERVICE_FILE)，跳过"
+        echo "  如需重新安装: sudo systemctl stop cat-mcp && sudo cp install/cat-mcp.service $SERVICE_FILE && sudo systemctl daemon-reload && sudo systemctl start cat-mcp"
+    else
+        if [ -f "$SERVICE_SRC" ]; then
+            mkdir -p "$SERVICE_DIR" 2>/dev/null
+            cp "$SERVICE_SRC" "$SERVICE_FILE"
+            systemctl daemon-reload 2>/dev/null || true
+            echo "  systemd 服务已安装: cat-mcp.service"
+            echo "  启动: sudo systemctl start cat-mcp"
+            echo "  开机自启: sudo systemctl enable cat-mcp"
+        else
+            echo "  install/cat-mcp.service 不存在，跳过"
+        fi
+    fi
+else
+    echo "[5/5] 跳过 systemd 服务安装"
+fi
+
+# ---- 完成 ----
+echo ""
+echo "安装完成!"
+echo "========================================"
+echo "  版本:   v${VERSION}"
+echo "  路径:   $PREFIX"
+echo "  配置:   $CONFIG_DIR/cat.yaml"
+echo "  数据:   $DATA_DIR"
+echo ""
+echo "快速启动:"
+echo "  cat-mcp --config $CONFIG_DIR/cat.yaml"
+echo ""
+
+if [ "$OS" = "Linux" ] && [ "$NO_SERVICE" = false ]; then
+    echo "服务管理（systemd）:"
+    echo "  sudo systemctl start|stop|restart cat-mcp"
+    echo "  sudo systemctl enable cat-mcp"
+    echo "  sudo journalctl -u cat-mcp -f"
+    echo ""
+fi
+
+echo "升级:"
+echo "  cd $SCRIPT_DIR && git pull && ./upgrade"
+echo ""

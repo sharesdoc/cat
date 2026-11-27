@@ -1,0 +1,34 @@
+[Unit]
+Description=Cat MCP Server — Remote engineering workspace MCP server
+Documentation=https://github.com/username/cat
+After=network.target
+
+[Service]
+Type=simple
+User=cat
+Group=cat
+ExecStart=/usr/local/bin/cat-mcp --config /etc/cat/cat.yaml
+WorkingDirectory=/opt/cat-mcp
+
+# 安全
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/var/lib/cat /etc/cat
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+
+# 重启策略
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target
