@@ -26,6 +26,7 @@ from cat_mcp.fs.mover import _register_cat_move_tools
 from cat_mcp.fs.trash import _register_cat_trash_tools
 from cat_mcp.fs.editor import _register_cat_edit_tools
 from cat_mcp.fs.copier import _register_cat_copy_tools
+from cat_mcp.fs.patcher import _register_cat_patch_tools
 
 __all__ = [
     "SecurePathResolver",
@@ -57,4 +58,5 @@ __all__ = [
     "_register_cat_trash_tools",
     "_register_cat_edit_tools",
     "_register_cat_copy_tools",
+    "_register_cat_patch_tools",
 ]

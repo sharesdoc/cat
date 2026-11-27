@@ -529,6 +529,14 @@ def create_app(
 
     _register_cat_copy_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Patch apply (CAT-22) — strict unified diff
+    # ------------------------------------------------------------------
+    # 依据: CAT-22
+    from cat_mcp.fs.patcher import _register_cat_patch_tools
+
+    _register_cat_patch_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
