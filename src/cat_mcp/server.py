@@ -431,6 +431,16 @@ def create_app(
     _register_cat_write_tools(server, _idempotency_checker)
 
     # ------------------------------------------------------------------
+    # Audit logger (CAT-27) — read/write/failure/denied event recording
+    # ------------------------------------------------------------------
+    # 依据: CAT-27
+    from cat_mcp.fs.audit import AuditLogger, set_audit_logger, _register_cat_audit_tools
+
+    _audit_logger = AuditLogger(manager)
+    set_audit_logger(_audit_logger)
+    _register_cat_audit_tools(server, _audit_logger)
+
+    # ------------------------------------------------------------------
     # Workspace manager
     # ------------------------------------------------------------------
     # 依据: Task-R-20261126012656444-P0
