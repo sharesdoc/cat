@@ -537,6 +537,14 @@ def create_app(
 
     _register_cat_patch_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Project info (CAT-29) — build file discovery / tech stack
+    # ------------------------------------------------------------------
+    # 依据: CAT-29
+    from cat_mcp.fs.project_scanner import _register_cat_project_info_tools
+
+    _register_cat_project_info_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
