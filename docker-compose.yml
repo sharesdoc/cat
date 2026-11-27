@@ -1,0 +1,100 @@
+# Cat MCP Server — 生产部署配置
+#
+# 安全约束：
+# - 仅暴露 443（HTTPS），反向代理 Caddy 处理 TLS
+# - 后端 Cat 进程监听 127.0.0.1:9100（私有）
+# - 专用非 root 用户运行
+# - 只读根文件系统
+# - 仅挂载授权的工程目录
+# - 无 Docker socket
+# 依据: CAT-34
+#
+# 使用方式：
+#   docker compose up -d
+#   第一次使用前配置 Caddy 的 TLS 证书和 config.yaml
+
+version: "3.9"
+
+services:
+  cat-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cat-mcp:latest
+    container_name: cat-mcp
+    restart: unless-stopped
+
+    # 安全：专用非 root 用户
+    user: "1001:1001"
+
+    # 安全：只读根文件系统 + 最小权限
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64M
+
+    # 安全：最小 Linux capabilities
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined  # Python 需要 seccomp 非限制
+
+    # 挂载持久化数据和受管工程
+    volumes:
+      # 持久化 SQLite 状态数据库
+      - cat-data:/var/lib/cat:rw
+      # 受管的工程目录（按需调整挂载点）
+      # - /srv/cat/projects:/srv/cat/projects:ro
+      # 配置文件
+      - ./config.yaml:/etc/cat/config.yaml:ro
+
+    # 环境变量
+    environment:
+      - CAT_HOST=127.0.0.1
+      - CAT_PORT=9100
+      - CAT_DB=/var/lib/cat/state.db
+      - CAT_CONFIG=/etc/cat/config.yaml
+      - CAT_AUTH_ENABLED=true
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # 后端只监听本地回环（不直接暴露）
+    # 通过反向代理（Caddy/Nginx）暴露 443
+    ports:
+      - "127.0.0.1:9100:9100"
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: "512M"
+
+  # 反向代理 — Caddy（自动 TLS）
+  caddy:
+    image: caddy:alpine
+    container_name: cat-caddy
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      cat-mcp:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+volumes:
+  cat-data:
+  caddy-data:

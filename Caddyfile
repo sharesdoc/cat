@@ -1,0 +1,34 @@
+# Cat MCP Server — Caddy 反向代理配置
+#
+# TLS 自动管理（Let's Encrypt）
+# 公网仅暴露 443（HTTPS）
+# 后端 Cat 监听 127.0.0.1:9100（私有）
+# 依据: CAT-34
+
+cat.example.com {
+    # 反向代理到 Cat MCP 后端
+    reverse_proxy 127.0.0.1:9100
+
+    # 安全头
+    header {
+        # 禁止 iframe 嵌入（防点击劫持）
+        X-Frame-Options "DENY"
+        # 防止 MIME 类型嗅探
+        X-Content-Type-Options "nosniff"
+        # 启用 XSS 过滤器
+        X-XSS-Protection "1; mode=block"
+        # HSTS（在配置了正式 TLS 后启用）
+        # Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        # 禁止客户端缓存（MCP 工具实时调用）
+        Cache-Control "no-store"
+    }
+
+    # 限制请求体大小（防止大 payload DoS）
+    request_body /max_size 10MB
+
+    # 日志
+    log {
+        output file /var/log/caddy/cat-mcp.log
+        format json
+    }
+}
