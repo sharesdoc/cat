@@ -31,6 +31,7 @@ from cat_mcp.fs.project_scanner import _register_cat_project_info_tools
 from cat_mcp.fs.git_tools import _register_cat_git_tools
 from cat_mcp.fs.chunked_io import _register_cat_chunked_io_tools
 from cat_mcp.fs.history import _register_cat_history_tools
+from cat_mcp.fs.restorer import _register_cat_restore_tools
 
 __all__ = [
     "SecurePathResolver",

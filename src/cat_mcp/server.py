@@ -569,6 +569,14 @@ def create_app(
 
     _register_cat_history_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Restore tool (CAT-32) — single-file restore from history/trash
+    # ------------------------------------------------------------------
+    # 依据: CAT-32
+    from cat_mcp.fs.restorer import _register_cat_restore_tools
+
+    _register_cat_restore_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
