@@ -489,6 +489,14 @@ def create_app(
 
     _register_cat_write_file_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Directory operations (CAT-23) — mkdir
+    # ------------------------------------------------------------------
+    # 依据: CAT-23
+    from cat_mcp.fs.directory_ops import _register_cat_directory_ops_tools
+
+    _register_cat_directory_ops_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

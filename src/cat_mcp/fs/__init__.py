@@ -21,6 +21,7 @@ from cat_mcp.fs.atomic import AtomicWriter, CommitStatus, CommitContext
 from cat_mcp.fs.idempotency import IdempotencyChecker
 from cat_mcp.fs.audit import AuditLogger, set_audit_logger, get_audit_logger
 from cat_mcp.fs.writer import _register_cat_write_tools
+from cat_mcp.fs.directory_ops import _register_cat_directory_ops_tools
 
 __all__ = [
     "SecurePathResolver",
@@ -47,4 +48,5 @@ __all__ = [
     "set_audit_logger",
     "get_audit_logger",
     "_register_cat_write_tools",
+    "_register_cat_directory_ops_tools",
 ]
