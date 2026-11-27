@@ -33,6 +33,7 @@ def _restore_file(
     state: Any,
     subject: str,
     project_root: str,
+    project_id: str,
     path: str,
     *,
     revision_id: str | None = None,
@@ -62,8 +63,10 @@ def _restore_file(
     """
     from cat_mcp.fs.paths import SecurePathResolver
     from cat_mcp.fs.sensitive import is_sensitive as _check_sensitive
-    from cat_mcp.fs.lock import get_lock_manager
-    from cat_mcp.fs.atomic import AtomicWriter, get_atomic_writer
+    from cat_mcp.fs.atomic import CommitStatus, get_atomic_writer
+    from cat_mcp.fs.quota import get_quota_manager, check_concurrency
+    from cat_mcp.acl import get_access_checker
+    from cat_mcp.fs.audit import get_audit_logger
 
     if not revision_id and not trash_path:
         raise CatError(
@@ -144,14 +147,23 @@ def _restore_file(
                 "No backup available for this revision",
             )
 
-        backup_file = os.path.join(project_root, _BACKUP_DIR, before_ref)
-        if not os.path.isfile(backup_file):
+        # 安全检查：验证备份路径在 .cat_backup 目录内
+        backup_candidate = os.path.join(project_root, _BACKUP_DIR, before_ref)
+        real_backup = os.path.realpath(backup_candidate)
+        real_cat_backup = os.path.realpath(os.path.join(project_root, _BACKUP_DIR))
+        if not real_backup.startswith(real_cat_backup + "/"):
+            raise CatError(
+                ErrorCode.PATH_OUT_OF_BOUNDS,
+                "Backup path is outside .cat_backup directory",
+            )
+
+        if not os.path.isfile(real_backup):
             raise CatError(
                 ErrorCode.FILE_NOT_FOUND,
                 f"Backup file not found: {before_ref}",
             )
 
-        source_path = backup_file
+        source_path = real_backup
         restore_source = f"revision:{revision_id}"
 
     # --- 模式 2：从回收区恢复 ---
@@ -206,44 +218,64 @@ def _restore_file(
                 "Use cat_write_file to force overwrite if needed.",
             )
 
-    # 使用 AtomicWriter 写入
-    atomic_writer = get_atomic_writer(project_root)
-    if atomic_writer is None:
-        from cat_mcp.fs.paths import SecurePathResolver as _SPR
-        lock_mgr = get_lock_manager()
-        atomic_writer = AtomicWriter(
-            project_root=project_root,
-            state_manager=state,
-            resolver=_SPR(project_root),
-            lock_manager=lock_mgr,
+    # ACL 授权校验
+    access_checker = get_access_checker()
+    if not access_checker.check(subject, project_id, path, "write"):
+        raise CatError(
+            ErrorCode.FORBIDDEN,
+            "Not authorized to restore to this path",
         )
 
-    final_request_id = request_id or f"restore_{hashlib.sha256((revision_id or trash_path or "").encode()).hexdigest()[:16]}"
+    # 使用 AtomicWriter 写入
+    atomic_writer = get_atomic_writer(project_root)
 
-    commit_ctx = atomic_writer.prepare_write(
-        path=path,
-        mode="replace" if current_exists else "create",
-        subject=subject,
-        request_id=final_request_id,
-    )
+    # 并发槽位获取
+    check_concurrency(subject)
+
+    # 幂等键（包含 path 防止不同目标被错误去重）
+    idempotent_input = (revision_id or trash_path or "") + "|" + path
+    final_request_id = request_id or f"restore_{hashlib.sha256(idempotent_input.encode()).hexdigest()[:16]}"
 
     try:
-        atomic_writer.write(commit_ctx, source_data)
-        atomic_writer.commit_write(commit_ctx)
-    except CatError:
-        atomic_writer.abort_write(commit_ctx)
-        raise
-    except Exception:
-        atomic_writer.abort_write(commit_ctx)
-        raise
+        ctx = atomic_writer.prepare_write(
+            file_path=path,
+            content=source_data,
+            subject=subject,
+            request_id=final_request_id,
+        )
 
-    return {
-        "path": path,
-        "restore_source": restore_source,
-        "size": len(source_data),
-        "sha256": source_hash,
-        "was_restore": True,
-    }
+        # 幂等命中：status 不是 PREPARED 说明是已有操作的重复请求
+        if ctx.status == CommitStatus.PREPARED:
+            try:
+                atomic_writer.commit_write(ctx)
+            except Exception:
+                atomic_writer.abort_write(ctx)
+                raise
+
+        # 审计日志
+        try:
+            audit = get_audit_logger()
+            audit.log(
+                subject=subject,
+                project_id=project_id,
+                action="restore",
+                outcome="success",
+                path=path,
+                bytes=len(source_data),
+                correlation_id=request_id,
+            )
+        except Exception:
+            logger.warning("Failed to log audit event for restore")
+
+        return {
+            "path": path,
+            "restore_source": restore_source,
+            "size": len(source_data),
+            "sha256": source_hash,
+            "operation_id": ctx.operation_id,
+        }
+    finally:
+        get_quota_manager().release_concurrency(subject)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +308,7 @@ def _register_cat_restore_tools(
             "两者互斥。如果目标文件已被修改则拒绝覆盖。"
             "恢复操作作为新的写入操作审计记录。"
         ),
+        destructive=True,
     )
     async def restore_file_handler(
         workspace_id: str,
@@ -301,6 +334,7 @@ def _register_cat_restore_tools(
             state=state,
             subject=subject,
             project_root=project_root,
+            project_id=project_id,
             path=path,
             revision_id=revision_id,
             trash_path=trash_path,
