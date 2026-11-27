@@ -56,7 +56,7 @@
 | T-实施计划 | doc/Task-R-20261126012656462-P1-Dev.md | 实现只读 Git 状态和差异查询（CAT-30） | P1 | 已完成-待验证 | 🟢 | B19 Git 只读；rev 审查后修复 4xP0+5xP1，白名单 target 限制，env 隔离 |
 | T-实施计划 | doc/Task-R-20261126012656465-P1-Dev.md | 实现单文件分块上传和下载（CAT-33） | P1 | 已完成-待验证 | 🟢 | B19 分块传输；5 个 MCP 工具，session 绑定主体，哈希校验，原子提交 |
 | T-实施计划 | doc/Task-R-20261126012656467-P1-Dev.md | 提供原生安装容器部署和升级回滚（CAT-35） | P1 | 已完成-待验证 | 🟢 | B19 发布工程；install/upgrade/rollback/uninstall 脚本 + systemd 服务 |
-| T-实施计划 | doc/Task-R-20261126012656469-P1-Dev.md | 完成大工程性能和资源限制基准（CAT-37） | P1 | 已完成-待验证 | 🟢 | B19 性能基准；benchmark 脚本 + 十万文件合成生成 + 基准报告 |
+| T-实施计划 | doc/Task-R-20261126012656469-P1-Dev.md | 完成大工程性能和资源限制基准（CAT-37） | P1 | 已完成-待验证 | 🟢 | B19 性能基准；benchmark 脚本，rev 审查后修复 2xP1 路径注入 |
 | T-实施计划 | doc/Task-R-20261126012656463-P1-Dev.md | 实现变更历史查询与文件差异对比（CAT-31） | P1 | 已完成-待验证 | 🟢 | B20 历史查询；list_changes/diff_file 工具 |
 | T-实施计划 | doc/Task-R-20261126012656464-P1-Dev.md | 实现单文件历史版本安全恢复（CAT-32） | P1 | 已完成-待验证 | 🟢 | B21 历史恢复；rev 审查后修复 5xP0+5xP1，ACL 授权/审计/AtomicWriter API 修正/幂等键/路径遍历防护 |
 | T-实施计划 | doc/Task-R-20261126012656470-P1-Dev.md | 完成公开发布文档与隐私检查（CAT-38） | P1 | 已完成-待验证 | 🟢 | B22 发布门禁；README 全面更新，NOTICE 第三方许可，CHANGELOG 完整 |
