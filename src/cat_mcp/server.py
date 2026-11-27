@@ -505,6 +505,14 @@ def create_app(
 
     _register_cat_move_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # Trash / soft delete (CAT-26) — move to .cat_trash
+    # ------------------------------------------------------------------
+    # 依据: CAT-26
+    from cat_mcp.fs.trash import _register_cat_trash_tools
+
+    _register_cat_trash_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 

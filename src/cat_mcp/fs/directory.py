@@ -48,6 +48,8 @@ _DEFAULT_IGNORE_DIRS: frozenset[str] = frozenset({
     "dist",
     "build",
     ".git",
+    ".cat_trash",
+    ".cat_backup",
 })
 
 # 安全打开目录的标志位（macOS 兼容：O_RDONLY + O_NOFOLLOW + O_NONBLOCK + O_CLOEXEC）

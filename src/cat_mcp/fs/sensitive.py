@@ -85,6 +85,12 @@ _DEFAULT_DENY_PATTERNS: list[str] = [
     # Token 文件
     "*.token",
     "*.tkn",
+    # 回收区（禁止通过标准工具访问）
+    ".cat_trash",
+    ".cat_trash/*",
+    ".cat_backup",
+    ".cat_backup/*",
+    ".cat_partial",
 ]
 
 # 编译后的模式缓存（.env.example 以例外形式处理）
