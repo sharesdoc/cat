@@ -16,6 +16,7 @@ from cat_mcp.fs.quota import (
 from cat_mcp.fs.reader import FileReader
 from cat_mcp.fs.sensitive import SensitiveFileChecker, is_sensitive, set_checker, get_checker
 from cat_mcp.fs.directory import DirectoryLister
+from cat_mcp.fs.lock import WriteLockManager, LockContext
 
 __all__ = [
     "SecurePathResolver",
@@ -32,4 +33,6 @@ __all__ = [
     "set_checker",
     "get_checker",
     "DirectoryLister",
+    "WriteLockManager",
+    "LockContext",
 ]

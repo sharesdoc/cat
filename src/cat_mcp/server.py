@@ -347,6 +347,15 @@ def create_app(
     set_quota_manager(_quota_mgr)
 
     # ------------------------------------------------------------------
+    # Write lock manager (CAT-17) — concurrency control for write operations
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656449-P0
+    from cat_mcp.fs.lock import WriteLockManager, set_lock_manager
+
+    _lock_mgr = WriteLockManager()
+    set_lock_manager(_lock_mgr)
+
+    # ------------------------------------------------------------------
     # Workspace manager
     # ------------------------------------------------------------------
     # 依据: Task-R-20261126012656444-P0
