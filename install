@@ -122,7 +122,7 @@ echo "[2/5] 创建目录..."
 mkdir -p "$PREFIX"
 mkdir -p "$PREFIX/bin"
 mkdir -p "$DATA_DIR"
-sudo mkdir -p "$CONFIG_DIR" 2>/dev/null || mkdir -p "$CONFIG_DIR"
+sudo mkdir -p "$CONFIG_DIR" 2>/dev/null && echo "  sudo 创建 $CONFIG_DIR" || mkdir -p "$CONFIG_DIR"
 
 # ---- 安装包 ----
 echo "[3/5] 安装 Cat MCP 包..."
@@ -138,12 +138,12 @@ else
     $PIP install --no-cache-dir -e .
 fi
 
-# ---- 创建启动脚本 ----
+# ---- 创建启动脚本（使用检测到的 PYTHON 路径） ----
 echo "[4/5] 创建启动脚本..."
-cat > "$PREFIX/bin/cat-mcp" <<'SCRIPT'
+cat > "$PREFIX/bin/cat-mcp" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 -m cat_mcp "$@"
+exec $PYTHON -m cat_mcp "\$@"
 SCRIPT
 chmod +x "$PREFIX/bin/cat-mcp"
 
@@ -152,8 +152,10 @@ if [ "$OS" = "Linux" ] && [ -d "/usr/local/bin" ]; then
     ln -sf "$PREFIX/bin/cat-mcp" "/usr/local/bin/cat-mcp" 2>/dev/null || true
 fi
 
-# 复制配置示例（从项目仓库复制 config.yaml 或 docker-compose 配置）
-CONFIG_SRC="$SCRIPT_DIR/config.yaml"
+# 复制配置示例（仅当未通过 --config 参数指定时使用默认路径）
+if [ -z "$CONFIG_SRC" ]; then
+    CONFIG_SRC="$SCRIPT_DIR/config.yaml"
+fi
 if [ -f "$CONFIG_SRC" ]; then
     if [ ! -f "$CONFIG_DIR/cat.yaml" ]; then
         mkdir -p "$CONFIG_DIR" 2>/dev/null
@@ -176,7 +178,7 @@ if [ "$NO_SERVICE" = false ] && [ "$OS" = "Linux" ]; then
 
     if [ -f "$SERVICE_FILE" ]; then
         echo "  服务文件已存在 ($SERVICE_FILE)，跳过"
-        echo "  如需重新安装: sudo systemctl stop cat-mcp && sudo cp install/cat-mcp.service $SERVICE_FILE && sudo systemctl daemon-reload && sudo systemctl start cat-mcp"
+        echo "  如需重新安装: sudo systemctl stop cat-mcp && sudo cp cat-mcp.service $SERVICE_FILE && sudo systemctl daemon-reload && sudo systemctl start cat-mcp"
     else
         if [ -f "$SERVICE_SRC" ]; then
             mkdir -p "$SERVICE_DIR" 2>/dev/null
