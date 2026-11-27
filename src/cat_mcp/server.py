@@ -561,6 +561,14 @@ def create_app(
 
     _register_cat_chunked_io_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # History tools (CAT-31) — change history query / file diff
+    # ------------------------------------------------------------------
+    # 依据: CAT-31
+    from cat_mcp.fs.history import _register_cat_history_tools
+
+    _register_cat_history_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
