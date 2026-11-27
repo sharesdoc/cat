@@ -13,6 +13,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 from typing import Any, Callable
 
 from mcp.server import MCPServer
@@ -354,6 +355,34 @@ def create_app(
 
     _lock_mgr = WriteLockManager()
     set_lock_manager(_lock_mgr)
+
+    # ------------------------------------------------------------------
+    # Atomic writer (CAT-18) — crash-safe atomic file writes
+    # ------------------------------------------------------------------
+    # 依据: Task-R-20261126012656450-P0
+    from cat_mcp.fs.atomic import AtomicWriter, set_atomic_writer
+    from cat_mcp.fs.paths import SecurePathResolver
+    from cat_mcp.fs.lock import get_lock_manager
+
+    for project_entry in config.projects:
+        _project_root = os.path.realpath(project_entry.root)
+        _atomic_writer = AtomicWriter(
+            project_root=_project_root,
+            state_manager=manager,
+            resolver=SecurePathResolver(_project_root),
+            lock_manager=get_lock_manager(),
+        )
+        set_atomic_writer(_project_root, _atomic_writer)
+        # 启动时执行崩溃恢复（冻结路径记录日志）
+        _frozen = _atomic_writer.recover(startup=True)
+        if _frozen:
+            logger.warning(
+                "AtomicWriter recovery: %d path(s) frozen IN_DOUBT "
+                "in project %r: %s",
+                len(_frozen),
+                project_entry.id,
+                [f["path"] for f in _frozen],
+            )
 
     # ------------------------------------------------------------------
     # Workspace manager
