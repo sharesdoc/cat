@@ -192,6 +192,8 @@ class AtomicWriter:
             file_basename = rp_name.name
 
         # 1. 解析目标路径
+        dir_fd: int = -1
+        temp_name: str = ""
         with self._resolver.resolve(file_path) as rp:
             dir_fd = rp.dir_fd
             target_name = rp.name
@@ -279,14 +281,28 @@ class AtomicWriter:
                     file_path, dir_fd=dir_fd, target_name=target_name,
                 )
 
-        # 7. 创建数据库操作记录
-        op = self._state.create_operation(
+        # 7. 创建数据库操作记录（幂等）
+        op, is_new = self._state.create_operation_idempotent(
             subject=subj,
             workspace_id=ws_id,
             request_id=req_id or file_basename,
             path=file_path,
             input_digest=file_hash,
         )
+        if not is_new:
+            # 幂等命中：清理刚写入的临时文件，释放锁，返回已有结果
+            _cleanup_temp_path(temp_abs)
+            self._lock_mgr.release_write_lock(lock_ctx.lock_id)
+            status = CommitStatus.COMMITTED if op.get("status") == "committed" else CommitStatus.PREPARED
+            return CommitContext(
+                operation_id=op.get("id", ""),
+                target_path=file_path,
+                temp_path=temp_abs,
+                backup_path=backup_path,
+                status=status,
+                file_hash=file_hash,
+            )
+
         operation_id = op["id"] if op else ""
 
         return CommitContext(

@@ -18,6 +18,7 @@ from cat_mcp.fs.sensitive import SensitiveFileChecker, is_sensitive, set_checker
 from cat_mcp.fs.directory import DirectoryLister
 from cat_mcp.fs.lock import WriteLockManager, LockContext
 from cat_mcp.fs.atomic import AtomicWriter, CommitStatus, CommitContext
+from cat_mcp.fs.idempotency import IdempotencyChecker
 
 __all__ = [
     "SecurePathResolver",
@@ -39,4 +40,5 @@ __all__ = [
     "AtomicWriter",
     "CommitStatus",
     "CommitContext",
+    "IdempotencyChecker",
 ]

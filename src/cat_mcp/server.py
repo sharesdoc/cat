@@ -274,6 +274,43 @@ def _register_cat_get_capabilities(server: MCPServer, config: AppConfig) -> None
 
 
 # ---------------------------------------------------------------------------
+# Write tools (CAT-19)
+# ---------------------------------------------------------------------------
+
+
+def _register_cat_write_tools(
+    server: MCPServer,
+    idempotency_checker: "IdempotencyChecker",
+) -> None:
+    """Register write-related MCP tools (``cat_get_operation``).
+
+    Args:
+        server: MCPServer instance.
+        idempotency_checker: Initialised :class:`IdempotencyChecker`.
+    """
+    # 依据: CAT-19
+
+    from cat_mcp.projects import get_current_subject
+
+    @cat_tool(
+        server,
+        name="cat_get_operation",
+        description=(
+            "查询指定 request_id 对应的写入操作状态和结果。"
+            "用于断线重连后确认请求是否已执行、结果如何。"
+            "只读，不修改任何状态。"
+        ),
+        read_only=True,
+    )
+    async def get_operation_handler(
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Return the operation record for a given *request_id*."""
+        subject = get_current_subject()
+        return idempotency_checker.get_operation_result(request_id, subject=subject)
+
+
+# ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
 
@@ -383,6 +420,15 @@ def create_app(
                 project_entry.id,
                 [f["path"] for f in _frozen],
             )
+
+    # ------------------------------------------------------------------
+    # Idempotency checker (CAT-19) — idempotent request handling
+    # ------------------------------------------------------------------
+    # 依据: CAT-19
+    from cat_mcp.fs.idempotency import IdempotencyChecker
+
+    _idempotency_checker = IdempotencyChecker(manager)
+    _register_cat_write_tools(server, _idempotency_checker)
 
     # ------------------------------------------------------------------
     # Workspace manager

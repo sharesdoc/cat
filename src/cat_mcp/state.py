@@ -14,6 +14,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from cat_mcp.errors import CatError, ErrorCode
+
 # ---------------------------------------------------------------------------
 # Schema version and DDL
 # ---------------------------------------------------------------------------
@@ -504,6 +506,102 @@ class StateManager:
             (request_id,),
         ).fetchone()
         return _row_to_dict(row)
+
+    def get_operation_by_id(self, operation_id: str) -> dict[str, Any] | None:
+        """Retrieve an operation by its primary key *id*, or return *None*.
+
+        Args:
+            operation_id: The ``operations.id`` primary key value.
+
+        Returns:
+            The operation row as a dict, or *None* if not found.
+        """
+        # 依据: CAT-19
+        row = self._conn.execute(
+            "SELECT * FROM operations WHERE id = ?",
+            (operation_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def create_operation_idempotent(
+        self,
+        subject: str,
+        workspace_id: str,
+        request_id: str,
+        path: str,
+        input_digest: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create an operation idempotently.
+
+        Checks if an operation with the same *request_id* already exists and
+        is in a terminal or committed state (``prepared``, ``committed``,
+        ``failed``, or ``in_doubt``).  If one exists:
+
+        * **input_digest matches** — return ``(existing, False)`` (idempotent
+          replay, no new row created).
+        * **input_digest differs** — raise :class:`CatError` with
+          ``REQUEST_ID_CONFLICT`` (same request id, different payload).
+
+        If no eligible operation exists for *request_id*, a new row is
+        inserted in ``prepared`` state and this method returns
+        ``(new, True)``.
+
+        The SELECT + INSERT is wrapped in an explicit transaction to prevent
+        race conditions between the idempotency check and the insert.
+
+        Args:
+            subject: 主体标识。
+            workspace_id: 工作空间 ID。
+            request_id: 请求标识（幂等判断键）。
+            path: 操作目标路径。
+            input_digest: 输入内容的 SHA-256 哈希。
+
+        Returns:
+            ``(operation_dict, is_new)`` 元组。is_new 为 ``True`` 表示新创建。
+
+        Raises:
+            CatError: ``REQUEST_ID_CONFLICT`` — 同 request_id 但 input_digest 不同。
+        """
+        # 依据: CAT-19
+        # 使用显式事务防止 SELECT → INSERT 之间的竞态
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.get_operation(request_id)
+            if existing is not None and existing.get("status") in (
+                "prepared", "committed", "failed", "in_doubt",
+            ):
+                existing_digest = existing.get("input_digest")
+                if existing_digest == input_digest:
+                    self._conn.execute("COMMIT")
+                    return existing, False
+                self._conn.execute("COMMIT")
+                raise CatError(
+                    ErrorCode.REQUEST_ID_CONFLICT,
+                    f"Request ID {request_id!r} already exists with different input",
+                )
+
+            oid = _generate_id()
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO operations "
+                "(id, subject, workspace_id, request_id, input_digest, "
+                " path, status, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'prepared', ?)",
+                (oid, subject, workspace_id, request_id, input_digest, path, now),
+            )
+            new = _row_to_dict(
+                self._conn.execute(
+                    "SELECT * FROM operations WHERE id = ?", (oid,)
+            ).fetchone()
+            )
+            self._conn.execute("COMMIT")
+        except CatError:
+            self._conn.execute("COMMIT")  # COMMIT before re-raising CatError
+            raise
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return new, True  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Revisions
