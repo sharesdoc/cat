@@ -464,7 +464,7 @@ def _apply_edits(
 
     # 按位置逆序应用（从文件尾向文件头，避免偏移累积）
     new_content = content
-    for start, end, i, old_t, new_t in reversed(spans):
+    for start, end, i, old_t, new_t in reversed(spans_sorted):
         new_content = new_content[:start] + new_t + new_content[end:]
 
     # 生成 diff

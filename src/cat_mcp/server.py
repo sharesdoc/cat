@@ -521,6 +521,14 @@ def create_app(
 
     _register_cat_edit_tools(server, _workspace_mgr, manager)
 
+    # ------------------------------------------------------------------
+    # File copy (CAT-25) — copy single file
+    # ------------------------------------------------------------------
+    # 依据: CAT-25
+    from cat_mcp.fs.copier import _register_cat_copy_tools
+
+    _register_cat_copy_tools(server, _workspace_mgr, manager)
+
     # Build the Streamable HTTP ASGI app
     app = server.streamable_http_app()
 
